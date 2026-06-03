@@ -15,6 +15,7 @@ export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
         dropdown.addOptions({
           'title': 'At the title (default)',
           'body': 'Beginning of the body',
+          'end': 'End of the note',
           'title-highlighted': 'Title highlighted (typing overwrites it)',
         });
         this.bind(dropdown, 'cursorPosition');

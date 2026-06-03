@@ -303,6 +303,43 @@ describe('applyPosition', () => {
     });
   });
 
+  describe('end mode', () => {
+    it('focuses the editor', () => {
+      const plugin = makePlugin('end');
+      const view = makeView(['line 0', 'line 1']) as any;
+      plugin.applyPosition(view);
+      expect(view.editor.focus).toHaveBeenCalled();
+    });
+
+    it('places cursor at end of last line', () => {
+      const plugin = makePlugin('end');
+      const view = makeView(['first line', 'second line', 'final']) as any;
+      plugin.applyPosition(view);
+      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 5, line: 2 });
+    });
+
+    it('places cursor at end of last line for a single-line note', () => {
+      const plugin = makePlugin('end');
+      const view = makeView(['only line']) as any;
+      plugin.applyPosition(view);
+      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 9, line: 0 });
+    });
+
+    it('handles an empty last line (ch: 0)', () => {
+      const plugin = makePlugin('end');
+      const view = makeView(['some content', '']) as any;
+      plugin.applyPosition(view);
+      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 1 });
+    });
+
+    it('does not call setEphemeralState', () => {
+      const plugin = makePlugin('end');
+      const view = makeView(['content']) as any;
+      plugin.applyPosition(view);
+      expect(view.leaf.setEphemeralState).not.toHaveBeenCalled();
+    });
+  });
+
   describe('body mode', () => {
     it('focuses the editor', () => {
       const plugin = makePlugin('body');

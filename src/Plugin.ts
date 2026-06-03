@@ -107,6 +107,14 @@ export class Plugin extends PluginBase<PluginTypes> {
     if (cursorPosition === 'body') {
       view.editor.focus();
       view.editor.setCursor(this.getBodyStart(view));
+      return;
+    }
+
+    if (cursorPosition === 'end') {
+      const editor = view.editor;
+      const lastLine = editor.lineCount() - 1;
+      editor.focus();
+      editor.setCursor({ ch: editor.getLine(lastLine).length, line: lastLine });
     }
   }
 }
