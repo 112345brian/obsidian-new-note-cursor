@@ -75,7 +75,11 @@ export class Plugin extends PluginBase<PluginTypes> {
     if (editor.lineCount() > 1 && editor.getLine(0).trim() === '---') {
       for (let i = 1; i < editor.lineCount(); i++) {
         if (editor.getLine(i).trim() === '---') {
-          const bodyLine = i + 1;
+          let bodyLine = i + 1;
+          // Skip one empty line if present (standard blank line after frontmatter)
+          if (bodyLine < editor.lineCount() && editor.getLine(bodyLine).trim() === '') {
+            bodyLine += 1;
+          }
           return { ch: 0, line: Math.min(bodyLine, editor.lineCount() - 1) };
         }
       }

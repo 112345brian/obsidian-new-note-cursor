@@ -214,20 +214,32 @@ describe('getBodyStart', () => {
     expect(bodyStart(['# Heading', '', 'Content'])).toEqual({ ch: 0, line: 0 });
   });
 
-  it('returns first line after closing --- for a standard frontmatter block', () => {
+  it('skips empty line after closing --- and lands on first content line', () => {
     const lines = ['---', 'title: My Note', 'tags: [test]', '---', '', '# Body'];
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 4 });
+    // line 4 is empty → skip it → land on line 5
+    expect(bodyStart(lines)).toEqual({ ch: 0, line: 5 });
   });
 
-  it('lands on the closing --- line itself when there is no body after it', () => {
+  it('lands directly after closing --- when no empty line follows', () => {
+    const lines = ['---', 'title: My Note', '---', '# Body'];
+    expect(bodyStart(lines)).toEqual({ ch: 0, line: 3 });
+  });
+
+  it('lands on the last line when frontmatter has no body at all', () => {
     const lines = ['---', 'title: My Note', '---'];
-    // bodyLine would be 3 but lineCount is 3 → clamped to 2
+    // bodyLine would be 3, clamped to 2 (last line)
     expect(bodyStart(lines)).toEqual({ ch: 0, line: 2 });
   });
 
-  it('skips a single-line frontmatter block', () => {
-    const lines = ['---', '---', 'Content here'];
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 2 });
+  it('stays on the empty line when frontmatter ends with empty line but nothing after', () => {
+    const lines = ['---', 'title: My Note', '---', ''];
+    // bodyLine=3 is empty → +1 → 4, clamped to 3 (last line)
+    expect(bodyStart(lines)).toEqual({ ch: 0, line: 3 });
+  });
+
+  it('skips a single-line frontmatter block and the empty line after it', () => {
+    const lines = ['---', '---', '', 'Content here'];
+    expect(bodyStart(lines)).toEqual({ ch: 0, line: 3 });
   });
 
   it('returns {line:0, ch:0} for unclosed frontmatter (no second ---)', () => {
@@ -247,9 +259,10 @@ describe('getBodyStart', () => {
     expect(bodyStart(lines)).toEqual({ ch: 0, line: 0 });
   });
 
-  it('places cursor on the empty line between frontmatter and content', () => {
+  it('skips the empty line between frontmatter and content', () => {
     const lines = ['---', 'title: Note', '---', '', '# Heading', 'text'];
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 3 });
+    // line 3 is empty → skip it → land on line 4 (# Heading)
+    expect(bodyStart(lines)).toEqual({ ch: 0, line: 4 });
   });
 });
 
@@ -305,11 +318,12 @@ describe('applyPosition', () => {
       expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
     });
 
-    it('skips frontmatter and places cursor on first body line', () => {
+    it('skips frontmatter and the blank line after it, placing cursor on content', () => {
       const plugin = makePlugin('body');
       const view = makeView(['---', 'title: Test', '---', '', 'Body here']) as any;
       plugin.applyPosition(view);
-      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 3 });
+      // line 3 is empty → skip → land on line 4
+      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 4 });
     });
 
     it('does not call setEphemeralState', () => {
