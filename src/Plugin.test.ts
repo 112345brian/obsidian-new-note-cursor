@@ -161,7 +161,7 @@ describe('handleFileOpen', () => {
     plugin.handleFileOpen(makeFile('test.md', Date.now()));
     expect(spy).not.toHaveBeenCalled(); // not immediate
 
-    vi.advanceTimersByTime(300);
+    vi.advanceTimersByTime(100);
     expect(spy).toHaveBeenCalledWith(editor, 'end');
   });
 
@@ -194,7 +194,7 @@ describe('handleFileOpen', () => {
     plugin.handleFileOpen(makeFile('test.md', Date.now()));
     // User navigates away before the delay fires
     setActiveEditor(plugin, makeEditorInfo([], 'other.md'));
-    vi.advanceTimersByTime(300);
+    vi.advanceTimersByTime(100);
     expect(spy).not.toHaveBeenCalled();
   });
 });

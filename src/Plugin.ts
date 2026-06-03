@@ -12,11 +12,12 @@ import { PluginSettingsTab } from './PluginSettingsTab.ts';
 // A file whose ctime is within this window is treated as newly created.
 const NEW_FILE_TTL_MS = 5_000;
 
-// Obsidian focuses the inline title ~50 ms after file-open for new notes.
-// We match Templater's 300 ms delay so we run after that initialization.
-const NEW_NOTE_DELAY_MS = 300;
+// Fast path: Obsidian focuses the inline title ~50 ms after file-open.
+// A 100 ms delay is enough to run after it when Templater isn't involved.
+const FAST_DELAY_MS = 100;
 
-// Templater waits 300 ms before writing templates; we wait a bit longer.
+// Templater waits 300 ms before writing templates; we wait a bit longer
+// so we see the final content and cursor-position frontmatter.
 const TEMPLATER_DEFER_MS = 350;
 
 // Safety-valve for mobile focus interceptor.
@@ -80,7 +81,10 @@ export class Plugin extends PluginBase<PluginTypes> {
 
     if (isNew) {
       // Obsidian focuses the inline title asynchronously after file-open.
-      // Wait for that to complete before placing our cursor.
+      // Fast mode (auto): when Templater won't touch the file, 100 ms is
+      // enough to run after Obsidian's init (~50 ms). When Templater is
+      // active we need 350 ms to run after it writes the template.
+      const delay = this.templaterWillProcess(file) ? TEMPLATER_DEFER_MS : FAST_DELAY_MS;
       window.setTimeout(() => {
         const editor = this.app.workspace.activeEditor;
         if (!editor?.editor || editor.file?.path !== file.path) {
@@ -96,7 +100,7 @@ export class Plugin extends PluginBase<PluginTypes> {
           }
         }
         this.setCursorPosition(editor, position);
-      }, NEW_NOTE_DELAY_MS);
+      }, delay);
     } else {
       // For existing notes there is no async title initialization — apply directly.
       const editor = this.app.workspace.activeEditor;
