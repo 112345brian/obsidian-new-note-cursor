@@ -34,13 +34,13 @@ The plugin is not yet listed in the official Community Plugins directory.
 1. Install [BRAT](https://obsidian.md/plugins?id=obsidian42-brat) and enable it.
 2. In BRAT settings, click **Add Beta Plugin** and enter:
    ```
-   https://github.com/112345brian/obsidian-new-note-cursor
+   https://github.com/112345brian/cursor-control
    ```
 3. Enable **New Note Cursor** in **Settings → Community plugins**.
 
 ### Manual
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/112345brian/obsidian-new-note-cursor/releases/latest).
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/112345brian/cursor-control/releases/latest).
 2. Copy the three files into `<your vault>/.obsidian/plugins/new-note-cursor/`.
 3. Enable **New Note Cursor** in **Settings → Community plugins**.
 
@@ -58,8 +58,8 @@ The title-focus modes use DOM manipulation on the `.inline-title` contenteditabl
 ## Development
 
 ```bash
-git clone https://github.com/112345brian/obsidian-new-note-cursor
-cd obsidian-new-note-cursor
+git clone https://github.com/112345brian/cursor-control
+cd cursor-control
 npm install
 npm run dev    # watch mode — outputs to dist/build/
 npm run build  # production build
