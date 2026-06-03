@@ -1,4 +1,4 @@
-import type { TFile } from 'obsidian';
+import type { MarkdownFileInfo, TFile } from 'obsidian';
 
 import { MarkdownView, Platform } from 'obsidian';
 import { PluginBase } from 'obsidian-dev-utils/obsidian/plugin/plugin-base';
@@ -12,10 +12,14 @@ import { PluginSettingsTab } from './PluginSettingsTab.ts';
 // A file whose ctime is within this window is treated as newly created.
 const NEW_FILE_TTL_MS = 5_000;
 
+// Obsidian focuses the inline title ~50 ms after file-open for new notes.
+// We match Templater's 300 ms delay so we run after that initialization.
+const NEW_NOTE_DELAY_MS = 300;
+
 // Templater waits 300 ms before writing templates; we wait a bit longer.
 const TEMPLATER_DEFER_MS = 350;
 
-// Safety-valve timeout for the mobile focus interceptor.
+// Safety-valve for mobile focus interceptor.
 const MOBILE_INTERCEPT_TIMEOUT_MS = 2_000;
 
 const VALID_FRONTMATTER_VALUES: readonly CursorPositionOrNone[] = [
@@ -47,138 +51,114 @@ export class Plugin extends PluginBase<PluginTypes> {
       return;
     }
 
-    const view = this.findActiveMarkdownView(file);
-    if (!view) {
-      return;
-    }
-
-    // Use ctime to detect new files — this sidesteps the event-ordering race
-    // between vault.on('create') and workspace.on('file-open').
     const isNew = this.isNewlyCreated(file);
 
-    // If Templater will write template content, defer until after it finishes
-    // so we see the final frontmatter (and don't fight over cursor ownership).
+    // Templater writes template content ~300 ms after creation.
+    // Defer past that so we read the final frontmatter.
     if (isNew && this.templaterWillProcess(file)) {
       window.setTimeout(() => {
-        const fresh = this.findActiveMarkdownView(file);
-        if (!fresh) {
+        const editor = this.app.workspace.activeEditor;
+        if (!editor?.editor || editor.file?.path !== file.path) {
           return;
         }
-        const override = this.getFrontmatterOverride(fresh, true);
+        const view = editor instanceof MarkdownView ? editor : null;
+        const override = view ? this.getFrontmatterOverride(view, true) : null;
         if (override && override !== 'none') {
-          this.applyPosition(fresh, file, override, true);
+          this.setCursorPosition(editor, override);
         }
       }, TEMPLATER_DEFER_MS);
       return;
     }
 
-    const position = this.resolvePosition(view, isNew);
+    const position = isNew
+      ? this.resolvePositionForNew(file)
+      : this.resolvePositionForOpen(file);
+
     if (position === 'none') {
       return;
     }
 
-    this.applyPosition(view, file, position, isNew);
-  }
-
-  // Route to the correct placement strategy based on platform + event type.
-  public applyPosition(view: MarkdownView, file: TFile, position: CursorPosition, isNew: boolean): void {
-    if (isNew && Platform.isMobile) {
-      // On mobile, Obsidian asynchronously focuses the inline title after
-      // file-open for new notes. Intercept that focus event so we run last.
-      this.scheduleMobilePosition(view, file, position);
-    } else {
-      this.setCursorPosition(view, position);
-    }
-  }
-
-  public resolvePosition(view: MarkdownView, isNew: boolean): CursorPositionOrNone {
-    return this.getFrontmatterOverride(view, isNew) ??
-      (isNew ? this.settings.onCreate : this.settings.onOpen);
-  }
-
-  public getFrontmatterOverride(view: MarkdownView, isNew: boolean): CursorPositionOrNone | null {
-    const specificKey = isNew ? 'cursor-position-create' : 'cursor-position-open';
-    return this.readFrontmatterKey(view, specificKey)
-      ?? this.readFrontmatterKey(view, 'cursor-position');
-  }
-
-  public getBodyStart(view: MarkdownView): { ch: number; line: number } {
-    const editor = view.editor;
-    if (editor.lineCount() > 1 && editor.getLine(0).trim() === '---') {
-      for (let i = 1; i < editor.lineCount(); i++) {
-        if (editor.getLine(i).trim() === '---') {
-          let bodyLine = i + 1;
-          if (bodyLine < editor.lineCount() && editor.getLine(bodyLine).trim() === '') {
-            bodyLine += 1;
-          }
-          return { ch: 0, line: Math.min(bodyLine, editor.lineCount() - 1) };
+    if (isNew) {
+      // Obsidian focuses the inline title asynchronously after file-open.
+      // Wait for that to complete before placing our cursor.
+      window.setTimeout(() => {
+        const editor = this.app.workspace.activeEditor;
+        if (!editor?.editor || editor.file?.path !== file.path) {
+          return;
         }
-      }
-    }
-    return { ch: 0, line: 0 };
-  }
-
-  public setCursorPosition(view: MarkdownView, position: CursorPosition): void {
-    if (position === 'title' || position === 'title-highlighted') {
-      const rename = position === 'title-highlighted' ? 'all' : 'end';
-      view.leaf.setEphemeralState({ rename });
-
-      const titleEl = view.containerEl.querySelector<HTMLElement>('.inline-title');
-      if (!titleEl) {
-        view.editor.focus();
-        view.editor.setCursor(this.getBodyStart(view));
+        if (Platform.isMobile) {
+          // On mobile the title may still steal focus after our delay.
+          // Intercept the next focus on the title element and redirect from there.
+          const leaf = this.app.workspace.getActiveViewOfType(MarkdownView);
+          if (leaf && position !== 'title') {
+            this.interceptAndRedirect(leaf, editor, file, position);
+            return;
+          }
+        }
+        this.setCursorPosition(editor, position);
+      }, NEW_NOTE_DELAY_MS);
+    } else {
+      // For existing notes there is no async title initialization — apply directly.
+      const editor = this.app.workspace.activeEditor;
+      if (!editor?.editor || editor.file?.path !== file.path) {
         return;
       }
-
-      titleEl.focus();
-      if (position === 'title-highlighted') {
-        const sel = window.getSelection();
-        if (sel) {
-          const range = document.createRange();
-          range.selectNodeContents(titleEl);
-          sel.removeAllRanges();
-          sel.addRange(range);
-        }
-      }
-      return;
-    }
-
-    if (position === 'body') {
-      view.editor.focus();
-      view.editor.setCursor(this.getBodyStart(view));
-      return;
-    }
-
-    if (position === 'end') {
-      const editor = view.editor;
-      const lastLine = editor.lineCount() - 1;
-      editor.focus();
-      editor.setCursor({ ch: editor.getLine(lastLine).length, line: lastLine });
+      this.setCursorPosition(editor, position);
     }
   }
 
-  // Mobile: intercept Obsidian's async title focus rather than fighting it.
-  public scheduleMobilePosition(view: MarkdownView, file: TFile, position: CursorPosition): void {
+  // Resolve the position for a new note, checking frontmatter first.
+  public resolvePositionForNew(file: TFile): CursorPositionOrNone {
+    // Frontmatter can only be read after the view is open — get a fresh reference.
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (view?.file?.path === file.path) {
+      const override = this.getFrontmatterOverride(view, true);
+      if (override !== null) {
+        return override;
+      }
+    }
+    return this.settings.onCreate;
+  }
+
+  // Resolve the position for an existing note.
+  public resolvePositionForOpen(file: TFile): CursorPositionOrNone {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (view?.file?.path === file.path) {
+      const override = this.getFrontmatterOverride(view, false);
+      if (override !== null) {
+        return override;
+      }
+    }
+    return this.settings.onOpen;
+  }
+
+  // On mobile, even at 300 ms the OS may refocus the inline title after we
+  // set the editor cursor. Hook the next focus event on .inline-title and
+  // redirect from inside it — guaranteed to run after any title focus.
+  public interceptAndRedirect(
+    view: MarkdownView,
+    editor: MarkdownFileInfo,
+    file: TFile,
+    position: CursorPosition,
+  ): void {
     const titleEl = view.containerEl.querySelector<HTMLElement>('.inline-title');
 
     if (!titleEl) {
-      this.setCursorPosition(view, position);
+      this.setCursorPosition(editor, position);
       return;
     }
 
-    if (position === 'title') {
-      // Obsidian's default for new notes is already cursor-at-title-end.
-      return;
-    }
-
-    const onTitleFocused = (): void => {
+    const onFocus = (): void => {
       window.setTimeout(() => {
-        const fresh = this.findActiveMarkdownView(file);
-        if (!fresh) {
+        const fresh = this.app.workspace.activeEditor;
+        if (!fresh?.editor || fresh.file?.path !== file.path) {
           return;
         }
         if (position === 'title-highlighted') {
-          const freshTitle = fresh.containerEl.querySelector<HTMLElement>('.inline-title');
+          const freshTitle = (fresh instanceof MarkdownView
+            ? fresh
+            : this.app.workspace.getActiveViewOfType(MarkdownView)
+          )?.containerEl.querySelector<HTMLElement>('.inline-title');
           if (freshTitle) {
             const sel = window.getSelection();
             if (sel) {
@@ -188,26 +168,84 @@ export class Plugin extends PluginBase<PluginTypes> {
               sel.addRange(range);
             }
           }
-          return;
-        }
-        fresh.editor.focus();
-        if (position === 'end') {
-          const lastLine = fresh.editor.lineCount() - 1;
-          fresh.editor.setCursor({ ch: fresh.editor.getLine(lastLine).length, line: lastLine });
         } else {
-          fresh.editor.setCursor(this.getBodyStart(fresh));
+          this.setCursorPosition(fresh, position);
         }
       }, 0);
     };
 
-    titleEl.addEventListener('focus', onTitleFocused, { once: true });
+    titleEl.addEventListener('focus', onFocus, { once: true });
     window.setTimeout(() => {
-      titleEl.removeEventListener('focus', onTitleFocused);
+      titleEl.removeEventListener('focus', onFocus);
     }, MOBILE_INTERCEPT_TIMEOUT_MS);
   }
 
-  // True when the file's ctime is within NEW_FILE_TTL_MS of now.
-  // Using ctime avoids the vault.on('create') / file-open event-ordering race.
+  public getFrontmatterOverride(view: MarkdownView, isNew: boolean): CursorPositionOrNone | null {
+    const specificKey = isNew ? 'cursor-position-create' : 'cursor-position-open';
+    return this.readFrontmatterKey(view, specificKey)
+      ?? this.readFrontmatterKey(view, 'cursor-position');
+  }
+
+  public getBodyStart(editor: MarkdownFileInfo): { ch: number; line: number } {
+    const ed = editor.editor!;
+    if (ed.lineCount() > 1 && ed.getLine(0).trim() === '---') {
+      for (let i = 1; i < ed.lineCount(); i++) {
+        if (ed.getLine(i).trim() === '---') {
+          let bodyLine = i + 1;
+          if (bodyLine < ed.lineCount() && ed.getLine(bodyLine).trim() === '') {
+            bodyLine += 1;
+          }
+          return { ch: 0, line: Math.min(bodyLine, ed.lineCount() - 1) };
+        }
+      }
+    }
+    return { ch: 0, line: 0 };
+  }
+
+  public setCursorPosition(editor: MarkdownFileInfo, position: CursorPosition): void {
+    const ed = editor.editor!;
+
+    if (position === 'title' || position === 'title-highlighted') {
+      // setEphemeralState is only on MarkdownView (WorkspaceLeaf), not MarkdownFileInfo
+      const view = editor instanceof MarkdownView
+        ? editor
+        : this.app.workspace.getActiveViewOfType(MarkdownView);
+
+      if (view) {
+        view.leaf.setEphemeralState({ rename: position === 'title-highlighted' ? 'all' : 'end' });
+        const titleEl = view.containerEl.querySelector<HTMLElement>('.inline-title');
+        if (!titleEl) {
+          ed.focus();
+          ed.setCursor(this.getBodyStart(editor));
+          return;
+        }
+        titleEl.focus();
+        if (position === 'title-highlighted') {
+          const sel = window.getSelection();
+          if (sel) {
+            const range = document.createRange();
+            range.selectNodeContents(titleEl);
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
+        }
+      }
+      return;
+    }
+
+    if (position === 'body') {
+      ed.focus();
+      ed.setCursor(this.getBodyStart(editor));
+      return;
+    }
+
+    if (position === 'end') {
+      const lastLine = ed.lineCount() - 1;
+      ed.focus();
+      ed.setCursor({ ch: ed.getLine(lastLine).length, line: lastLine });
+    }
+  }
+
   public isNewlyCreated(file: TFile): boolean {
     return (Date.now() - file.stat.ctime) <= NEW_FILE_TTL_MS;
   }
@@ -233,25 +271,7 @@ export class Plugin extends PluginBase<PluginTypes> {
     });
   }
 
-  public findActiveMarkdownView(file: TFile): MarkdownView | null {
-    // Try the standard API first (works for main workspace).
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (view?.file?.path === file.path) {
-      return view;
-    }
-    // Fall back to activeLeaf (covers hover editors, popout windows).
-    const leaf = (this.app.workspace as any).activeLeaf;
-    if (!leaf) {
-      return null;
-    }
-    const leafView = leaf.view;
-    if (!(leafView instanceof MarkdownView)) {
-      return null;
-    }
-    return leafView.file?.path === file.path ? leafView : null;
-  }
-
-  private readFrontmatterKey(view: MarkdownView, key: string): CursorPositionOrNone | null {
+  public readFrontmatterKey(view: MarkdownView, key: string): CursorPositionOrNone | null {
     const editor = view.editor;
     if (editor.lineCount() < 2 || editor.getLine(0).trim() !== '---') {
       return null;

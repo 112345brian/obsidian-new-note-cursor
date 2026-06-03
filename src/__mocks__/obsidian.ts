@@ -25,3 +25,13 @@ export const Platform = {
   isIosApp: false,
   isAndroidApp: false,
 };
+
+export interface MarkdownFileInfo {
+  editor: {
+    focus(): void;
+    getLine(n: number): string;
+    lineCount(): number;
+    setCursor(pos: unknown): void;
+  } | null;
+  file: { path: string } | null;
+}
