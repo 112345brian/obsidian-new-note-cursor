@@ -5,5 +5,6 @@
   "id": "new-note-cursor",
   "isDesktopOnly": false,
   "name": "New Note Cursor",
-  "version": "0.0.0"
+  "minAppVersion": "1.4.0",
+  "version": "2.0.0"
 }
