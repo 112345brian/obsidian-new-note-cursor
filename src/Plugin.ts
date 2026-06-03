@@ -1,4 +1,4 @@
-import type { TAbstractFile, TFile } from 'obsidian';
+import type { TFile } from 'obsidian';
 
 import { MarkdownView, Platform } from 'obsidian';
 import { PluginBase } from 'obsidian-dev-utils/obsidian/plugin/plugin-base';
@@ -9,24 +9,20 @@ import type { PluginTypes } from './PluginTypes.ts';
 import { PluginSettingsManager } from './PluginSettingsManager.ts';
 import { PluginSettingsTab } from './PluginSettingsTab.ts';
 
+// A file whose ctime is within this window is treated as newly created.
 const NEW_FILE_TTL_MS = 5_000;
+
+// Templater waits 300 ms before writing templates; we wait a bit longer.
 const TEMPLATER_DEFER_MS = 350;
-// If Obsidian never focuses the title (e.g. inline title was just toggled off),
-// clean up our interceptor after this long.
+
+// Safety-valve timeout for the mobile focus interceptor.
 const MOBILE_INTERCEPT_TIMEOUT_MS = 2_000;
 
 const VALID_FRONTMATTER_VALUES: readonly CursorPositionOrNone[] = [
   'title', 'body', 'end', 'title-highlighted', 'none',
 ];
 
-interface FileRecord {
-  createdAt: number;
-  templaterWillProcess: boolean;
-}
-
 export class Plugin extends PluginBase<PluginTypes> {
-  private readonly recentlyCreated = new Map<string, FileRecord>();
-
   protected override createSettingsManager(): PluginSettingsManager {
     return new PluginSettingsManager(this);
   }
@@ -37,27 +33,15 @@ export class Plugin extends PluginBase<PluginTypes> {
 
   protected override async onloadImpl(): Promise<void> {
     await super.onloadImpl();
-    this.registerEvent(this.app.vault.on('create', this.handleCreate.bind(this)));
-    this.registerEvent(this.app.workspace.on('file-open', this.handleFileOpen.bind(this)));
-  }
-
-  public handleCreate(file: TAbstractFile): void {
-    if (!file.path.endsWith('.md')) {
-      return;
-    }
-    this.recentlyCreated.set(file.path, {
-      createdAt: Date.now(),
-      templaterWillProcess: this.templaterWillProcess(file as TFile),
-    });
+    this.registerEvent(
+      this.app.workspace.on('file-open', this.handleFileOpen.bind(this))
+    );
   }
 
   public handleFileOpen(file: TFile | null): void {
     if (!file) {
       return;
     }
-
-    const record = this.consumeRecord(file);
-    const isNew = record !== null;
 
     if (this.isExcluded(file)) {
       return;
@@ -68,7 +52,13 @@ export class Plugin extends PluginBase<PluginTypes> {
       return;
     }
 
-    if (isNew && record.templaterWillProcess) {
+    // Use ctime to detect new files — this sidesteps the event-ordering race
+    // between vault.on('create') and workspace.on('file-open').
+    const isNew = this.isNewlyCreated(file);
+
+    // If Templater will write template content, defer until after it finishes
+    // so we see the final frontmatter (and don't fight over cursor ownership).
+    if (isNew && this.templaterWillProcess(file)) {
       window.setTimeout(() => {
         const fresh = this.findActiveMarkdownView(file);
         if (!fresh) {
@@ -76,7 +66,7 @@ export class Plugin extends PluginBase<PluginTypes> {
         }
         const override = this.getFrontmatterOverride(fresh, true);
         if (override && override !== 'none') {
-          this.setCursorPosition(fresh, override);
+          this.applyPosition(fresh, file, override, true);
         }
       }, TEMPLATER_DEFER_MS);
       return;
@@ -87,26 +77,18 @@ export class Plugin extends PluginBase<PluginTypes> {
       return;
     }
 
-    // On mobile, Obsidian asynchronously focuses the inline title after
-    // file-open for new notes — any cursor change we make here gets
-    // overridden. Instead of fighting the timing, we listen for the focus
-    // event Obsidian will trigger and redirect from inside that callback,
-    // so we are guaranteed to run last.
-    if (isNew && Platform.isMobile) {
-      this.scheduleMobilePosition(view, file, position);
-      return;
-    }
-
-    this.setCursorPosition(view, position);
+    this.applyPosition(view, file, position, isNew);
   }
 
-  public consumeRecord(file: TFile): FileRecord | null {
-    const rec = this.recentlyCreated.get(file.path);
-    if (!rec) {
-      return null;
+  // Route to the correct placement strategy based on platform + event type.
+  public applyPosition(view: MarkdownView, file: TFile, position: CursorPosition, isNew: boolean): void {
+    if (isNew && Platform.isMobile) {
+      // On mobile, Obsidian asynchronously focuses the inline title after
+      // file-open for new notes. Intercept that focus event so we run last.
+      this.scheduleMobilePosition(view, file, position);
+    } else {
+      this.setCursorPosition(view, position);
     }
-    this.recentlyCreated.delete(file.path);
-    return Date.now() - rec.createdAt <= NEW_FILE_TTL_MS ? rec : null;
   }
 
   public resolvePosition(view: MarkdownView, isNew: boolean): CursorPositionOrNone {
@@ -136,8 +118,6 @@ export class Plugin extends PluginBase<PluginTypes> {
     return { ch: 0, line: 0 };
   }
 
-  // Synchronous cursor placement — used on desktop and for open events on mobile.
-  // For new notes on mobile use scheduleMobilePosition instead.
   public setCursorPosition(view: MarkdownView, position: CursorPosition): void {
     if (position === 'title' || position === 'title-highlighted') {
       const rename = position === 'title-highlighted' ? 'all' : 'end';
@@ -145,14 +125,12 @@ export class Plugin extends PluginBase<PluginTypes> {
 
       const titleEl = view.containerEl.querySelector<HTMLElement>('.inline-title');
       if (!titleEl) {
-        // Inline title disabled — fall back to body start
         view.editor.focus();
         view.editor.setCursor(this.getBodyStart(view));
         return;
       }
 
       titleEl.focus();
-
       if (position === 'title-highlighted') {
         const sel = window.getSelection();
         if (sel) {
@@ -179,16 +157,11 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
   }
 
-  // Mobile-specific handler for new note creation.
-  // Obsidian focuses the inline title asynchronously after file-open, overriding
-  // anything we set synchronously. We register a one-time focus listener on that
-  // element and apply our positioning from inside it — guaranteed to run after
-  // Obsidian finishes its own initialization.
+  // Mobile: intercept Obsidian's async title focus rather than fighting it.
   public scheduleMobilePosition(view: MarkdownView, file: TFile, position: CursorPosition): void {
     const titleEl = view.containerEl.querySelector<HTMLElement>('.inline-title');
 
     if (!titleEl) {
-      // No race condition without an inline title — apply directly.
       this.setCursorPosition(view, position);
       return;
     }
@@ -199,15 +172,12 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
 
     const onTitleFocused = (): void => {
-      // Yield one tick so the browser finishes the focus transition, then redirect.
       window.setTimeout(() => {
         const fresh = this.findActiveMarkdownView(file);
         if (!fresh) {
           return;
         }
-
         if (position === 'title-highlighted') {
-          // Title is already focused — just extend to a full selection.
           const freshTitle = fresh.containerEl.querySelector<HTMLElement>('.inline-title');
           if (freshTitle) {
             const sel = window.getSelection();
@@ -220,8 +190,6 @@ export class Plugin extends PluginBase<PluginTypes> {
           }
           return;
         }
-
-        // body / end — move focus away from the title into the editor.
         fresh.editor.focus();
         if (position === 'end') {
           const lastLine = fresh.editor.lineCount() - 1;
@@ -233,11 +201,15 @@ export class Plugin extends PluginBase<PluginTypes> {
     };
 
     titleEl.addEventListener('focus', onTitleFocused, { once: true });
-
-    // Safety valve: if Obsidian never focuses the title (edge case), clean up.
     window.setTimeout(() => {
       titleEl.removeEventListener('focus', onTitleFocused);
     }, MOBILE_INTERCEPT_TIMEOUT_MS);
+  }
+
+  // True when the file's ctime is within NEW_FILE_TTL_MS of now.
+  // Using ctime avoids the vault.on('create') / file-open event-ordering race.
+  public isNewlyCreated(file: TFile): boolean {
+    return (Date.now() - file.stat.ctime) <= NEW_FILE_TTL_MS;
   }
 
   public templaterWillProcess(file: TFile): boolean {
@@ -262,15 +234,21 @@ export class Plugin extends PluginBase<PluginTypes> {
   }
 
   public findActiveMarkdownView(file: TFile): MarkdownView | null {
+    // Try the standard API first (works for main workspace).
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (view?.file?.path === file.path) {
+      return view;
+    }
+    // Fall back to activeLeaf (covers hover editors, popout windows).
     const leaf = (this.app.workspace as any).activeLeaf;
     if (!leaf) {
       return null;
     }
-    const view = leaf.view;
-    if (!(view instanceof MarkdownView)) {
+    const leafView = leaf.view;
+    if (!(leafView instanceof MarkdownView)) {
       return null;
     }
-    return view.file?.path === file.path ? view : null;
+    return leafView.file?.path === file.path ? leafView : null;
   }
 
   private readFrontmatterKey(view: MarkdownView, key: string): CursorPositionOrNone | null {
