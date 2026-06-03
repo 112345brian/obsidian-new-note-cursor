@@ -68,6 +68,20 @@ export class Plugin extends PluginBase<PluginTypes> {
     this.applyPosition(view);
   }
 
+  private getBodyStart(view: MarkdownView): { ch: number; line: number } {
+    const editor = view.editor;
+    // If the note opens with a YAML frontmatter block, skip past it
+    if (editor.lineCount() > 1 && editor.getLine(0) === '---') {
+      for (let i = 1; i < editor.lineCount(); i++) {
+        if (editor.getLine(i) === '---') {
+          const bodyLine = i + 1;
+          return { ch: 0, line: Math.min(bodyLine, editor.lineCount() - 1) };
+        }
+      }
+    }
+    return { ch: 0, line: 0 };
+  }
+
   private applyPosition(view: MarkdownView): void {
     const { cursorPosition } = this.settings;
 
@@ -94,7 +108,7 @@ export class Plugin extends PluginBase<PluginTypes> {
 
     if (cursorPosition === 'body') {
       view.editor.focus();
-      view.editor.setCursor({ line: 0, ch: 0 });
+      view.editor.setCursor(this.getBodyStart(view));
     }
   }
 }
