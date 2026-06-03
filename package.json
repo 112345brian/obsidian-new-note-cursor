@@ -1,0 +1,43 @@
+{
+  "name": "new-note-cursor",
+  "version": "0.0.0",
+  "description": "Sets cursor position when creating a new note.",
+  "keywords": [],
+  "license": "MIT",
+  "author": "bripow",
+  "type": "module",
+  "scripts": {
+    "build": "jiti scripts/build.ts",
+    "build:clean": "jiti scripts/build-clean.ts",
+    "build:compile:typescript": "jiti scripts/build-compile-typescript.ts",
+    "build:compile": "jiti scripts/build-compile.ts",
+    "dev": "jiti scripts/dev.ts",
+    "format": "jiti scripts/format.ts",
+    "format:check": "jiti scripts/format-check.ts",
+    "lint": "jiti scripts/lint.ts",
+    "lint:fix": "jiti scripts/lint-fix.ts",
+    "prepare": "jiti scripts/prepare.ts",
+    "spellcheck": "jiti scripts/spellcheck.ts",
+    "version": "jiti scripts/version.ts"
+  },
+  "devDependencies": {
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6",
+    "@tsconfig/strictest": "latest",
+    "@types/node": "25.0.3",
+    "jiti": "latest",
+    "moment": "2.29.4",
+    "obsidian": "latest",
+    "obsidian-dev-utils": "^55.0.0",
+    "obsidian-typings": "obsidian-public-latest"
+  },
+  "overrides": {
+    "@antfu/utils": "9.2.0",
+    "boolean": "npm:dry-uninstall",
+    "dompurify": "3.0.1",
+    "type-fest": "latest"
+  },
+  "dependencies": {
+    "obsidian-integration-testing": "^4.2.0"
+  }
+}
