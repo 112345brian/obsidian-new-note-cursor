@@ -3,6 +3,7 @@ import type { TAbstractFile, TFile } from 'obsidian';
 import { MarkdownView } from 'obsidian';
 import { PluginBase } from 'obsidian-dev-utils/obsidian/plugin/plugin-base';
 
+import type { CursorPosition } from './PluginSettings.ts';
 import type { PluginTypes } from './PluginTypes.ts';
 
 import { PluginSettingsManager } from './PluginSettingsManager.ts';
@@ -10,6 +11,12 @@ import { PluginSettingsTab } from './PluginSettingsTab.ts';
 
 // How long after creation we'll still treat a file-open as "new note"
 const NEW_FILE_TTL_MS = 5_000;
+
+// Frontmatter key users can set in individual notes to override the global setting.
+// Example: cursor-position: body
+export const FRONTMATTER_KEY = 'cursor-position';
+
+const VALID_POSITIONS: readonly CursorPosition[] = ['title', 'body', 'end', 'title-highlighted'];
 
 export class Plugin extends PluginBase<PluginTypes> {
   private readonly recentlyCreated = new Map<string, number>();
@@ -25,12 +32,10 @@ export class Plugin extends PluginBase<PluginTypes> {
   protected override async onloadImpl(): Promise<void> {
     await super.onloadImpl();
 
-    // Record every newly created markdown file with a timestamp
     this.registerEvent(
       this.app.vault.on('create', this.handleCreate.bind(this))
     );
 
-    // When the workspace opens a file, check if it was just created
     this.registerEvent(
       this.app.workspace.on('file-open', this.handleFileOpen.bind(this))
     );
@@ -52,7 +57,6 @@ export class Plugin extends PluginBase<PluginTypes> {
       return;
     }
 
-    // Discard entries from before this session (e.g. crash-recovery reopens)
     if (Date.now() - createdAt > NEW_FILE_TTL_MS) {
       this.recentlyCreated.delete(file.path);
       return;
@@ -68,15 +72,42 @@ export class Plugin extends PluginBase<PluginTypes> {
     this.applyPosition(view);
   }
 
+  // Read cursor-position from the note's own frontmatter, parsed directly
+  // from editor lines so there's no metadata-cache timing risk on fresh files.
+  public getFrontmatterOverride(view: MarkdownView): CursorPosition | null {
+    const editor = view.editor;
+
+    if (editor.lineCount() < 2 || editor.getLine(0).trim() !== '---') {
+      return null;
+    }
+
+    for (let i = 1; i < editor.lineCount(); i++) {
+      const line = editor.getLine(i);
+
+      // Stop at closing delimiter
+      if (line.trim() === '---') {
+        break;
+      }
+
+      const match = /^cursor-position:\s*["']?([^"'\s]+)["']?/.exec(line);
+      if (match) {
+        const value = match[1] as CursorPosition;
+        if (VALID_POSITIONS.includes(value)) {
+          return value;
+        }
+      }
+    }
+
+    return null;
+  }
+
   public getBodyStart(view: MarkdownView): { ch: number; line: number } {
     const editor = view.editor;
 
-    // Skip YAML frontmatter: opening --- on line 0, find the closing ---
     if (editor.lineCount() > 1 && editor.getLine(0).trim() === '---') {
       for (let i = 1; i < editor.lineCount(); i++) {
         if (editor.getLine(i).trim() === '---') {
           let bodyLine = i + 1;
-          // Skip one empty line if present (standard blank line after frontmatter)
           if (bodyLine < editor.lineCount() && editor.getLine(bodyLine).trim() === '') {
             bodyLine += 1;
           }
@@ -89,17 +120,14 @@ export class Plugin extends PluginBase<PluginTypes> {
   }
 
   public applyPosition(view: MarkdownView): void {
-    const { cursorPosition } = this.settings;
+    const cursorPosition = this.getFrontmatterOverride(view) ?? this.settings.cursorPosition;
 
     if (cursorPosition === 'title') {
-      // Put cursor at end of inline title — works on desktop and mobile
       view.leaf.setEphemeralState({ rename: 'end' });
       return;
     }
 
     if (cursorPosition === 'title-highlighted') {
-      // Select entire title so typing immediately overwrites it.
-      // Uses the same API Templater uses for the same effect.
       view.leaf.setEphemeralState({ rename: 'all' });
       return;
     }

@@ -10,7 +10,7 @@ export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
 
     new SettingEx(this.containerEl)
       .setName('Cursor position on new note')
-      .setDesc('Where the cursor should land after a new note is created.')
+      .setDesc('Where the cursor should land after a new note is created. Override per note with cursor-position: <value> in frontmatter.')
       .addDropdown((dropdown) => {
         dropdown.addOptions({
           'title': 'At the title (default)',

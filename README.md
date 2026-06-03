@@ -2,6 +2,18 @@
 
 An [Obsidian](https://obsidian.md) plugin that controls where the cursor lands when you create a new note.
 
+## Per-note overrides
+
+Add `cursor-position` to a note's frontmatter to override the global setting for that note. This is most useful in templates.
+
+```yaml
+---
+cursor-position: body
+---
+```
+
+Valid values: `title` · `body` · `end` · `title-highlighted`
+
 ## Settings
 
 Open **Settings → New Note Cursor** and choose one of three cursor behaviors:
@@ -9,7 +21,8 @@ Open **Settings → New Note Cursor** and choose one of three cursor behaviors:
 | Option | Behavior |
 |---|---|
 | **At the title** *(default)* | Focus moves to the inline title field so you can immediately type or edit the note name |
-| **Beginning of the body** | Cursor is placed at the very first character of the note body, ready for content |
+| **Beginning of the body** | Cursor is placed after the frontmatter (skipping the blank separator line) |
+| **End of the note** | Cursor is placed at the end of the last line — useful for appending to template content |
 | **Title highlighted** | The title is selected end-to-end — start typing and it is instantly overwritten |
 
 ## Installation

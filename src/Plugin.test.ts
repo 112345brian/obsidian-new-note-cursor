@@ -61,6 +61,7 @@ function makePlugin(cursorPosition: PluginSettings['cursorPosition'] = 'body') {
     handleFileOpen: Plugin.prototype.handleFileOpen,
     applyPosition: Plugin.prototype.applyPosition,
     getBodyStart: Plugin.prototype.getBodyStart,
+    getFrontmatterOverride: Plugin.prototype.getFrontmatterOverride,
     recentlyCreated: new Map<string, number>(),
     settings,
   } as unknown as Plugin & {
@@ -196,6 +197,68 @@ describe('handleFileOpen', () => {
 });
 
 // ---------------------------------------------------------------------------
+// getFrontmatterOverride
+// ---------------------------------------------------------------------------
+
+describe('getFrontmatterOverride', () => {
+  function override(lines: string[]) {
+    const plugin = makePlugin();
+    const view = makeView(lines) as any;
+    return plugin.getFrontmatterOverride(view);
+  }
+
+  it('returns null for a note with no frontmatter', () => {
+    expect(override(['# Title', '', 'content'])).toBeNull();
+  });
+
+  it('returns null for an empty note', () => {
+    expect(override([''])).toBeNull();
+  });
+
+  it('returns null when frontmatter has no cursor-position key', () => {
+    expect(override(['---', 'title: My Note', '---', 'content'])).toBeNull();
+  });
+
+  it('returns the value when cursor-position is set to body', () => {
+    expect(override(['---', 'cursor-position: body', '---'])).toBe('body');
+  });
+
+  it('returns the value when cursor-position is set to end', () => {
+    expect(override(['---', 'cursor-position: end', '---'])).toBe('end');
+  });
+
+  it('returns the value when cursor-position is set to title', () => {
+    expect(override(['---', 'cursor-position: title', '---'])).toBe('title');
+  });
+
+  it('returns the value when cursor-position is set to title-highlighted', () => {
+    expect(override(['---', 'cursor-position: title-highlighted', '---'])).toBe('title-highlighted');
+  });
+
+  it('accepts values wrapped in double quotes', () => {
+    expect(override(['---', 'cursor-position: "body"', '---'])).toBe('body');
+  });
+
+  it('accepts values wrapped in single quotes', () => {
+    expect(override(['---', "cursor-position: 'end'", '---'])).toBe('end');
+  });
+
+  it('returns null for an unrecognised value', () => {
+    expect(override(['---', 'cursor-position: somewhere-invalid', '---'])).toBeNull();
+  });
+
+  it('finds the key among other frontmatter fields', () => {
+    const lines = ['---', 'title: My Note', 'tags: [a, b]', 'cursor-position: end', 'date: 2024-01-01', '---'];
+    expect(override(lines)).toBe('end');
+  });
+
+  it('stops searching at the closing --- and returns null if key comes after', () => {
+    const lines = ['---', 'title: Note', '---', 'cursor-position: body'];
+    expect(override(lines)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // getBodyStart
 // ---------------------------------------------------------------------------
 
@@ -271,6 +334,24 @@ describe('getBodyStart', () => {
 // ---------------------------------------------------------------------------
 
 describe('applyPosition', () => {
+  describe('frontmatter override', () => {
+    it('uses the frontmatter value instead of the global setting', () => {
+      // Global setting is 'title' but frontmatter says 'end'
+      const plugin = makePlugin('title');
+      const view = makeView(['---', 'cursor-position: end', '---', '', 'content']) as any;
+      plugin.applyPosition(view);
+      expect(view.leaf.setEphemeralState).not.toHaveBeenCalled();
+      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 7, line: 4 });
+    });
+
+    it('falls back to global setting when no frontmatter override is present', () => {
+      const plugin = makePlugin('title-highlighted');
+      const view = makeView(['no frontmatter here']) as any;
+      plugin.applyPosition(view);
+      expect(view.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'all' });
+    });
+  });
+
   describe('title mode', () => {
     it('calls setEphemeralState({ rename: "end" }) on the leaf', () => {
       const plugin = makePlugin('title');
