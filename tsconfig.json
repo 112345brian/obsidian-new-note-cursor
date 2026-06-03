@@ -26,7 +26,8 @@
     "./commitlint.config.ts",
     "./eslint.config.*ts",
     "./scripts/**/*.ts",
-    "./src/**/*.ts"
+    "./src/**/*.ts",
+    "./vitest.config.ts"
   ],
   "exclude": [
     "./src/**/*.test.ts",

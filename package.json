@@ -32,7 +32,6 @@
     "@vitest/coverage-v8": "^4.1.8",
     "jiti": "latest",
     "jsdom": "^29.1.1",
-    "moment": "2.29.4",
     "obsidian": "latest",
     "obsidian-dev-utils": "^55.0.0",
     "obsidian-typings": "obsidian-public-latest",
