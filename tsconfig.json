@@ -27,5 +27,9 @@
     "./eslint.config.*ts",
     "./scripts/**/*.ts",
     "./src/**/*.ts"
+  ],
+  "exclude": [
+    "./src/**/*.test.ts",
+    "./src/__mocks__/**"
   ]
 }

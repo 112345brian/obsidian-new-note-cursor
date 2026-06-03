@@ -3,7 +3,7 @@
   "authorUrl": "https://github.com/112345brian/",
   "description": "Sets cursor position when creating a new note.",
   "id": "new-note-cursor",
-  "isDesktopOnly": true,
+  "isDesktopOnly": false,
   "name": "New Note Cursor",
   "version": "0.0.0"
 }

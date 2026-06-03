@@ -18,18 +18,25 @@
     "lint:fix": "jiti scripts/lint-fix.ts",
     "prepare": "jiti scripts/prepare.ts",
     "spellcheck": "jiti scripts/spellcheck.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "version": "jiti scripts/version.ts"
   },
   "devDependencies": {
     "@codemirror/state": "6.5.0",
     "@codemirror/view": "6.38.6",
     "@tsconfig/strictest": "latest",
+    "@types/jsdom": "^28.0.3",
     "@types/node": "25.0.3",
+    "@vitest/coverage-v8": "^4.1.8",
     "jiti": "latest",
+    "jsdom": "^29.1.1",
     "moment": "2.29.4",
     "obsidian": "latest",
     "obsidian-dev-utils": "^55.0.0",
-    "obsidian-typings": "obsidian-public-latest"
+    "obsidian-typings": "obsidian-public-latest",
+    "vitest": "^4.1.8"
   },
   "overrides": {
     "@antfu/utils": "9.2.0",
