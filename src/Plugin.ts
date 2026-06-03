@@ -136,16 +136,33 @@ export class Plugin extends PluginBase<PluginTypes> {
       const rename = position === 'title-highlighted' ? 'all' : 'end';
       view.leaf.setEphemeralState({ rename });
 
-      // (#4) Inline title fallback: if the user has disabled "Show inline title"
-      // in Obsidian settings, .inline-title won't exist — fall back to body start.
       const titleEl = view.containerEl.querySelector<HTMLElement>('.inline-title');
-      if (titleEl) {
-        // Focus triggers the on-screen keyboard on mobile (#1 mobile fix)
-        titleEl.focus();
-      } else {
+      if (!titleEl) {
+        // Inline title disabled — fall back to body start
         view.editor.focus();
         view.editor.setCursor(this.getBodyStart(view));
+        return;
       }
+
+      // Defer one frame so setEphemeralState has time to render the title
+      // element into its rename state before we manipulate the selection.
+      // This is what makes mobile work: setEphemeralState handles Obsidian's
+      // internal state (desktop), and the explicit Range selection below
+      // handles the actual DOM highlight (required on mobile WebView).
+      window.setTimeout(() => {
+        titleEl.focus();
+        const sel = window.getSelection();
+        if (!sel) {
+          return;
+        }
+        const range = document.createRange();
+        range.selectNodeContents(titleEl);
+        if (position === 'title') {
+          range.collapse(false); // cursor at end, nothing selected
+        }
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }, 0);
       return;
     }
 

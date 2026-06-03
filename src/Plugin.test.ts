@@ -29,7 +29,10 @@ function makeEditor(lines: string[]) {
 function makeView(lines: string[], path = 'test.md') {
   const leaf = { setEphemeralState: vi.fn() } as unknown as WorkspaceLeaf;
   const editor = makeEditor(lines);
-  const titleEl = { focus: vi.fn() } as unknown as HTMLElement;
+  // Use a real DOM element so Range/Selection APIs work in JSDOM
+  const titleEl = document.createElement('div');
+  titleEl.contentEditable = 'true';
+  vi.spyOn(titleEl, 'focus');
   const containerEl = { querySelector: vi.fn().mockReturnValue(titleEl) } as unknown as HTMLElement;
   // Use MarkdownView.prototype so instanceof checks pass in Plugin code
   const view = Object.assign(Object.create(MarkdownView.prototype), {
@@ -438,19 +441,32 @@ describe('getBodyStart', () => {
 
 describe('setCursorPosition', () => {
   describe('title', () => {
-    it('calls setEphemeralState and focuses inline-title when present', () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+
+    it('calls setEphemeralState synchronously then focuses and collapses selection after timeout', () => {
       const plugin = makePlugin();
       const view = makeView([]);
       plugin.setCursorPosition(view, 'title');
+      // setEphemeralState fires immediately
       expect(view.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'end' });
+      // focus / selection deferred
+      expect(view._titleEl.focus).not.toHaveBeenCalled();
+      vi.runAllTimers();
       expect(view._titleEl.focus).toHaveBeenCalled();
+    });
+
+    it('does not move the editor cursor', () => {
+      const plugin = makePlugin();
+      const view = makeView(['content']);
+      plugin.setCursorPosition(view, 'title');
+      vi.runAllTimers();
       expect(view.editor.setCursor).not.toHaveBeenCalled();
     });
 
-    it('falls back to body start when inline-title is absent', () => {
+    it('falls back to body start synchronously when inline-title is absent', () => {
       const plugin = makePlugin();
       const view = makeView(['content']);
-      view.containerEl.querySelector = vi.fn().mockReturnValue(null); // no inline-title
+      view.containerEl.querySelector = vi.fn().mockReturnValue(null);
       plugin.setCursorPosition(view, 'title');
       expect(view.editor.focus).toHaveBeenCalled();
       expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
@@ -458,15 +474,19 @@ describe('setCursorPosition', () => {
   });
 
   describe('title-highlighted', () => {
-    it('calls setEphemeralState({ rename: "all" }) and focuses inline-title', () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+
+    it('calls setEphemeralState synchronously then focuses and selects all after timeout', () => {
       const plugin = makePlugin();
       const view = makeView([]);
       plugin.setCursorPosition(view, 'title-highlighted');
       expect(view.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'all' });
+      expect(view._titleEl.focus).not.toHaveBeenCalled();
+      vi.runAllTimers();
       expect(view._titleEl.focus).toHaveBeenCalled();
     });
 
-    it('falls back to body start when inline-title is absent', () => {
+    it('falls back to body start synchronously when inline-title is absent', () => {
       const plugin = makePlugin();
       const view = makeView(['---', 'title: T', '---', '', 'content']);
       view.containerEl.querySelector = vi.fn().mockReturnValue(null);
