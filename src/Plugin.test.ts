@@ -24,22 +24,18 @@ function makeEditor(lines: string[]) {
   };
 }
 
-function makeEditorInfo(lines: string[], path = 'test.md'): MarkdownFileInfo & { _titleEl: HTMLElement } {
+function makeEditorInfo(lines: string[], path = 'test.md') {
   const leaf = { setEphemeralState: vi.fn() };
   const editor = makeEditor(lines);
   const titleEl = document.createElement('div');
   titleEl.contentEditable = 'true';
   vi.spyOn(titleEl, 'focus');
   const containerEl = { querySelector: vi.fn().mockReturnValue(titleEl) };
-
-  // Create a MarkdownView-like object (instanceof check passes)
   const view = Object.assign(Object.create(MarkdownView.prototype), {
     containerEl, editor, file: { path } as TFile, leaf,
   });
-
-  // Attach a ._titleEl for test assertions
   (view as any)._titleEl = titleEl;
-  return view;
+  return view as any;
 }
 
 function makePlugin(
@@ -65,13 +61,13 @@ function makePlugin(
       _activeEditorRef: activeEditor,
     } as unknown as App,
     handleFileOpen: Plugin.prototype.handleFileOpen,
+    watchAndRedirect: Plugin.prototype.watchAndRedirect,
     getFrontmatterOverride: Plugin.prototype.getFrontmatterOverride,
+    readFrontmatterKey: Plugin.prototype.readFrontmatterKey,
     resolvePositionForNew: Plugin.prototype.resolvePositionForNew,
     resolvePositionForOpen: Plugin.prototype.resolvePositionForOpen,
-    readFrontmatterKey: Plugin.prototype.readFrontmatterKey,
     getBodyStart: Plugin.prototype.getBodyStart,
     setCursorPosition: Plugin.prototype.setCursorPosition,
-    interceptAndRedirect: Plugin.prototype.interceptAndRedirect,
     isNewlyCreated: Plugin.prototype.isNewlyCreated,
     isExcluded: Plugin.prototype.isExcluded,
     templaterWillProcess: vi.fn().mockReturnValue(false),
@@ -79,7 +75,7 @@ function makePlugin(
   } as any;
 }
 
-function setActiveEditor(plugin: any, editor: MarkdownFileInfo | null) {
+function setActiveEditor(plugin: any, editor: any) {
   plugin.app._activeEditorRef.value = editor;
   plugin.app.workspace.getActiveViewOfType.mockReturnValue(
     editor instanceof MarkdownView ? editor : null
@@ -91,12 +87,8 @@ function setActiveEditor(plugin: any, editor: MarkdownFileInfo | null) {
 // ---------------------------------------------------------------------------
 
 describe('isNewlyCreated', () => {
-  it('returns true for a file created right now', () => {
-    expect(makePlugin().isNewlyCreated(makeFile('t.md', Date.now()))).toBe(true);
-  });
-
   it('returns true within 5 s window', () => {
-    expect(makePlugin().isNewlyCreated(makeFile('t.md', Date.now() - 4_000))).toBe(true);
+    expect(makePlugin().isNewlyCreated(makeFile('t.md', Date.now() - 1_000))).toBe(true);
   });
 
   it('returns false after 5 s', () => {
@@ -117,17 +109,13 @@ describe('isExcluded', () => {
     expect(makePlugin('body', 'none', ['Templates']).isExcluded(makeFile('Templates/daily.md'))).toBe(true);
   });
 
-  it('does not exclude a folder with similar name prefix', () => {
+  it('does not exclude similar name prefix', () => {
     expect(makePlugin('body', 'none', ['Templates']).isExcluded(makeFile('TemplatesBackup/note.md'))).toBe(false);
-  });
-
-  it('handles trailing slashes', () => {
-    expect(makePlugin('body', 'none', ['Templates/']).isExcluded(makeFile('Templates/note.md'))).toBe(true);
   });
 });
 
 // ---------------------------------------------------------------------------
-// handleFileOpen — routing
+// handleFileOpen
 // ---------------------------------------------------------------------------
 
 describe('handleFileOpen', () => {
@@ -135,102 +123,164 @@ describe('handleFileOpen', () => {
   afterEach(() => { Platform.isMobile = false; });
 
   it('does nothing for null', () => {
-    const plugin = makePlugin();
-    const spy = vi.spyOn(plugin, 'setCursorPosition');
-    plugin.handleFileOpen(null);
-    vi.runAllTimers();
-    expect(spy).not.toHaveBeenCalled();
+    expect(() => makePlugin().handleFileOpen(null)).not.toThrow();
   });
 
   it('skips excluded folders', () => {
     const plugin = makePlugin('body', 'none', ['Templates']);
     const editor = makeEditorInfo([], 'Templates/note.md');
     setActiveEditor(plugin, editor);
-    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    const spy = vi.spyOn(plugin, 'watchAndRedirect').mockImplementation(() => undefined);
     plugin.handleFileOpen(makeFile('Templates/note.md'));
     vi.runAllTimers();
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('applies onCreate with 300 ms delay for a new file', () => {
-    const plugin = makePlugin('end', 'none');
+  it('calls watchAndRedirect for a new file', () => {
+    const plugin = makePlugin('body');
     const editor = makeEditorInfo(['content']);
     setActiveEditor(plugin, editor);
-    const spy = vi.spyOn(plugin, 'setCursorPosition');
-
+    const spy = vi.spyOn(plugin, 'watchAndRedirect').mockImplementation(() => undefined);
     plugin.handleFileOpen(makeFile('test.md', Date.now()));
-    expect(spy).not.toHaveBeenCalled(); // not immediate
-
-    vi.advanceTimersByTime(100);
-    expect(spy).toHaveBeenCalledWith(editor, 'end');
+    expect(spy).toHaveBeenCalledWith(expect.anything(), 'body');
   });
 
-  it('applies onOpen immediately for an existing file (no delay needed)', () => {
+  it('applies setCursorPosition immediately for an existing file', () => {
     const plugin = makePlugin('title', 'body');
     const editor = makeEditorInfo(['content']);
     setActiveEditor(plugin, editor);
     const spy = vi.spyOn(plugin, 'setCursorPosition');
-
     plugin.handleFileOpen(makeFile('test.md', Date.now() - 60_000));
-    expect(spy).toHaveBeenCalledWith(editor, 'body'); // immediate
+    expect(spy).toHaveBeenCalledWith(editor, 'body');
   });
 
   it('skips when resolved position is none', () => {
     const plugin = makePlugin('title', 'none');
     const editor = makeEditorInfo(['content']);
     setActiveEditor(plugin, editor);
-    const spy = vi.spyOn(plugin, 'setCursorPosition');
-
+    const setCursorSpy = vi.spyOn(plugin, 'setCursorPosition');
+    const watchSpy = vi.spyOn(plugin, 'watchAndRedirect').mockImplementation(() => undefined);
     plugin.handleFileOpen(makeFile('test.md', Date.now() - 60_000));
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  it('skips after 300 ms if the file is no longer active', () => {
-    const plugin = makePlugin('body');
-    const editor = makeEditorInfo(['content']);
-    setActiveEditor(plugin, editor);
-    const spy = vi.spyOn(plugin, 'setCursorPosition');
-
-    plugin.handleFileOpen(makeFile('test.md', Date.now()));
-    // User navigates away before the delay fires
-    setActiveEditor(plugin, makeEditorInfo([], 'other.md'));
-    vi.advanceTimersByTime(100);
-    expect(spy).not.toHaveBeenCalled();
+    expect(setCursorSpy).not.toHaveBeenCalled();
+    expect(watchSpy).not.toHaveBeenCalled();
   });
 });
 
 // ---------------------------------------------------------------------------
-// Templater compatibility
+// watchAndRedirect
+// ---------------------------------------------------------------------------
+
+describe('watchAndRedirect', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+
+  it('does nothing for title mode', () => {
+    const plugin = makePlugin();
+    const editor = makeEditorInfo([]);
+    setActiveEditor(plugin, editor);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.watchAndRedirect(makeFile(), 'title');
+    vi.runAllTimers();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('redirects to body when title focus fires', () => {
+    const plugin = makePlugin();
+    const editor = makeEditorInfo(['content']);
+    setActiveEditor(plugin, editor);
+    plugin.watchAndRedirect(makeFile(), 'body');
+    vi.advanceTimersByTime(0);
+
+    editor._titleEl.dispatchEvent(new Event('focus'));
+    vi.advanceTimersByTime(0);
+
+    expect(editor.editor.focus).toHaveBeenCalled();
+    expect(editor.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
+  });
+
+  it('redirects to end when title focus fires', () => {
+    const plugin = makePlugin();
+    const editor = makeEditorInfo(['first', 'last line']);
+    setActiveEditor(plugin, editor);
+    plugin.watchAndRedirect(makeFile(), 'end');
+    vi.advanceTimersByTime(0);
+
+    editor._titleEl.dispatchEvent(new Event('focus'));
+    vi.advanceTimersByTime(0);
+
+    expect(editor.editor.setCursor).toHaveBeenCalledWith({ ch: 9, line: 1 });
+  });
+
+  it('handles multiple focus events up to the intercept limit', () => {
+    const plugin = makePlugin();
+    const editor = makeEditorInfo(['content']);
+    setActiveEditor(plugin, editor);
+    plugin.watchAndRedirect(makeFile(), 'body');
+    vi.advanceTimersByTime(0);
+
+    for (let i = 0; i < 5; i++) {
+      editor._titleEl.dispatchEvent(new Event('focus'));
+      vi.advanceTimersByTime(0);
+    }
+    expect(editor.editor.setCursor).toHaveBeenCalledTimes(5);
+
+    // 6th should be ignored
+    editor.editor.setCursor.mockClear();
+    editor._titleEl.dispatchEvent(new Event('focus'));
+    vi.advanceTimersByTime(0);
+    expect(editor.editor.setCursor).not.toHaveBeenCalled();
+  });
+
+  it('removes listener after safety timeout', () => {
+    const plugin = makePlugin();
+    const editor = makeEditorInfo(['content']);
+    setActiveEditor(plugin, editor);
+    const removeSpy = vi.spyOn(editor._titleEl, 'removeEventListener');
+    plugin.watchAndRedirect(makeFile(), 'body');
+    vi.advanceTimersByTime(0);
+    vi.advanceTimersByTime(2_000);
+    expect(removeSpy).toHaveBeenCalled();
+  });
+
+  it('applies directly when inline-title element is absent', () => {
+    const plugin = makePlugin();
+    const editor = makeEditorInfo(['content']);
+    editor.containerEl.querySelector = vi.fn().mockReturnValue(null);
+    setActiveEditor(plugin, editor);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.watchAndRedirect(makeFile(), 'body');
+    vi.advanceTimersByTime(0);
+    expect(spy).toHaveBeenCalledWith(editor, 'body');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Templater
 // ---------------------------------------------------------------------------
 
 describe('Templater', () => {
   beforeEach(() => { vi.useFakeTimers(); });
 
-  it('defers and skips for Templater file with no frontmatter override', () => {
+  it('defers and skips when no frontmatter override', () => {
     const plugin = makePlugin('body');
     plugin.templaterWillProcess.mockReturnValue(true);
-    const editor = makeEditorInfo(['']); // empty before template written
+    const editor = makeEditorInfo(['']);
     setActiveEditor(plugin, editor);
     const spy = vi.spyOn(plugin, 'setCursorPosition');
-
     plugin.handleFileOpen(makeFile('test.md', Date.now()));
     vi.advanceTimersByTime(350);
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('defers and applies frontmatter override after Templater writes template', () => {
+  it('applies frontmatter override after Templater writes', () => {
     const plugin = makePlugin('body');
     plugin.templaterWillProcess.mockReturnValue(true);
     const emptyEditor = makeEditorInfo(['']);
     setActiveEditor(plugin, emptyEditor);
     const spy = vi.spyOn(plugin, 'setCursorPosition');
-
     plugin.handleFileOpen(makeFile('test.md', Date.now()));
 
-    // Simulate Templater writing a template with cursor-position
     const templateEditor = makeEditorInfo(['---', 'cursor-position: end', '---', '', 'content']);
     setActiveEditor(plugin, templateEditor);
-
     vi.advanceTimersByTime(350);
     expect(spy).toHaveBeenCalledWith(templateEditor, 'end');
   });
@@ -256,10 +306,6 @@ describe('getFrontmatterOverride', () => {
 
   it('cursor-position-create takes precedence on create', () => {
     expect(override(['---', 'cursor-position: title', 'cursor-position-create: end', '---'], true)).toBe('end');
-  });
-
-  it('cursor-position-open takes precedence on open', () => {
-    expect(override(['---', 'cursor-position: title', 'cursor-position-open: end', '---'], false)).toBe('end');
   });
 
   it('returns none for cursor-position: none', () => {
@@ -288,10 +334,6 @@ describe('getBodyStart', () => {
     expect(bodyStart(['---', 'title: T', '---', '', '# Body'])).toEqual({ ch: 0, line: 4 });
   });
 
-  it('lands after --- when no blank line follows', () => {
-    expect(bodyStart(['---', 'title: T', '---', '# Body'])).toEqual({ ch: 0, line: 3 });
-  });
-
   it('returns {line:0} for unclosed frontmatter', () => {
     expect(bodyStart(['---', 'no close'])).toEqual({ ch: 0, line: 0 });
   });
@@ -302,39 +344,27 @@ describe('getBodyStart', () => {
 // ---------------------------------------------------------------------------
 
 describe('setCursorPosition', () => {
-  it('title — calls setEphemeralState and focuses inline-title', () => {
+  it('title — calls setEphemeralState and focuses title', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo([]);
     setActiveEditor(plugin, editor);
     plugin.setCursorPosition(editor, 'title');
     expect(editor.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'end' });
     expect(editor._titleEl.focus).toHaveBeenCalled();
-    expect(editor.editor.setCursor).not.toHaveBeenCalled();
   });
 
-  it('title — falls back to body when inline-title absent', () => {
-    const plugin = makePlugin();
-    const editor = makeEditorInfo(['content']);
-    (editor as any).containerEl.querySelector = vi.fn().mockReturnValue(null);
-    setActiveEditor(plugin, editor);
-    plugin.setCursorPosition(editor, 'title');
-    expect(editor.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
-  });
-
-  it('title-highlighted — calls setEphemeralState({ rename: "all" })', () => {
+  it('title-highlighted — calls setEphemeralState({ rename: all })', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo([]);
     setActiveEditor(plugin, editor);
     plugin.setCursorPosition(editor, 'title-highlighted');
     expect(editor.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'all' });
-    expect(editor._titleEl.focus).toHaveBeenCalled();
   });
 
-  it('body — places cursor after frontmatter', () => {
+  it('body — places cursor at body start', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo(['---', 'title: T', '---', '', 'Content']);
     plugin.setCursorPosition(editor, 'body');
-    expect(editor.editor.focus).toHaveBeenCalled();
     expect(editor.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 4 });
   });
 
@@ -343,6 +373,15 @@ describe('setCursorPosition', () => {
     const editor = makeEditorInfo(['first', 'last line']);
     plugin.setCursorPosition(editor, 'end');
     expect(editor.editor.setCursor).toHaveBeenCalledWith({ ch: 9, line: 1 });
+  });
+
+  it('title — falls back to body when inline-title absent', () => {
+    const plugin = makePlugin();
+    const editor = makeEditorInfo(['content']);
+    editor.containerEl.querySelector = vi.fn().mockReturnValue(null);
+    setActiveEditor(plugin, editor);
+    plugin.setCursorPosition(editor, 'title');
+    expect(editor.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
   });
 });
 

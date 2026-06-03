@@ -16,9 +16,12 @@ import { PluginSettingsManager } from './PluginSettingsManager.ts';
 import { PluginSettingsTab } from './PluginSettingsTab.ts';
 
 const NEW_FILE_TTL_MS = 5_000;
-const FAST_DELAY_MS = 100;
 const TEMPLATER_DEFER_MS = 350;
-const MOBILE_INTERCEPT_TIMEOUT_MS = 2_000;
+// How many times we will re-apply our position in response to Obsidian
+// Re-focusing the inline title during its new-note initialization sequence.
+const MAX_TITLE_INTERCEPTS = 5;
+// Safety valve: stop intercepting after this long regardless.
+const INTERCEPT_TIMEOUT_MS = 2_000;
 // Frontmatter requires at least an opening --- and one closing line.
 const FRONTMATTER_MIN_LINES = 2;
 
@@ -26,7 +29,6 @@ const VALID_FRONTMATTER_VALUES: readonly CursorPositionOrNone[] = [
   'body', 'end', 'none', 'title', 'title-highlighted'
 ];
 
-// Named return type for getBodyStart.
 interface EditorPosition {
   ch: number;
   line: number;
@@ -114,75 +116,19 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
 
     if (isNew) {
-      // Fast mode: 100 ms beats Obsidian's ~50 ms title-focus init without
-      // Needing the full 350 ms Templater delay.
-      window.setTimeout(() => {
-        const editor = this.app.workspace.activeEditor;
-        if (!editor?.editor || editor.file?.path !== file.path) {
-          return;
-        }
-        if (Platform.isMobile) {
-          const leaf = this.app.workspace.getActiveViewOfType(MarkdownView);
-          if (leaf && position !== 'title') {
-            this.interceptAndRedirect(leaf, editor, file, position);
-            return;
-          }
-        }
-        this.setCursorPosition(editor, position);
-      }, FAST_DELAY_MS);
+      // For new notes, Obsidian asynchronously focuses the inline title one or
+      // More times during its initialization sequence. A fixed delay can't beat
+      // All of them reliably. Instead, watch the title element and redirect on
+      // Every focus event until the initialization window closes.
+      this.watchAndRedirect(file, position);
     } else {
+      // Existing notes have no async initialization — apply immediately.
       const editor = this.app.workspace.activeEditor;
       if (!editor?.editor || editor.file?.path !== file.path) {
         return;
       }
       this.setCursorPosition(editor, position);
     }
-  }
-
-  public interceptAndRedirect(
-    view: MarkdownView,
-    editor: MarkdownFileInfo,
-    file: TFile,
-    position: CursorPosition
-  ): void {
-    const titleEl = view.containerEl.querySelector<HTMLElement>('.inline-title');
-
-    if (!titleEl) {
-      this.setCursorPosition(editor, position);
-      return;
-    }
-
-    // eslint-disable-next-line func-style -- arrow needed to capture `this` inside a class method
-    const onFocus = (): void => {
-      window.setTimeout(() => {
-        const fresh = this.app.workspace.activeEditor;
-        if (!fresh?.editor || fresh.file?.path !== file.path) {
-          return;
-        }
-        if (position === 'title-highlighted') {
-          const freshView = fresh instanceof MarkdownView
-            ? fresh
-            : this.app.workspace.getActiveViewOfType(MarkdownView);
-          const freshTitle = freshView?.containerEl.querySelector<HTMLElement>('.inline-title');
-          if (freshTitle) {
-            const sel = window.getSelection();
-            if (sel) {
-              const range = document.createRange();
-              range.selectNodeContents(freshTitle);
-              sel.removeAllRanges();
-              sel.addRange(range);
-            }
-          }
-        } else {
-          this.setCursorPosition(fresh, position);
-        }
-      }, 0);
-    };
-
-    titleEl.addEventListener('focus', onFocus, { once: true });
-    window.setTimeout(() => {
-      titleEl.removeEventListener('focus', onFocus);
-    }, MOBILE_INTERCEPT_TIMEOUT_MS);
   }
 
   public isExcluded(file: TFile): boolean {
@@ -298,6 +244,89 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
     return (plugin.templater?.files_with_pending_templates?.has(file.path) ?? false)
       || (plugin.settings?.trigger_on_file_creation ?? false);
+  }
+
+  // For new notes: hook every title-focus event Obsidian fires during init
+  // And redirect to the desired position each time. Stops after MAX_TITLE_INTERCEPTS
+  // Or INTERCEPT_TIMEOUT_MS, whichever comes first.
+  public watchAndRedirect(file: TFile, position: CursorPosition): void {
+    if (position === 'title') {
+      // Obsidian's default for new notes is already cursor-at-title-end.
+      return;
+    }
+
+    // Give the view one tick to render (file-open fires before the first paint).
+    window.setTimeout(() => {
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!view || view.file?.path !== file.path) {
+        return;
+      }
+
+      const titleEl = view.containerEl.querySelector<HTMLElement>('.inline-title');
+      if (!titleEl) {
+        // No inline title (disabled in settings) — apply directly.
+        const editor = this.app.workspace.activeEditor;
+        if (editor?.editor && editor.file?.path === file.path) {
+          this.setCursorPosition(editor, position);
+        }
+        return;
+      }
+
+      let redirectCount = 0;
+
+      // eslint-disable-next-line func-style -- arrow needed to capture outer `this`
+      const onTitleFocus = (): void => {
+        redirectCount += 1;
+        if (redirectCount > MAX_TITLE_INTERCEPTS) {
+          return;
+        }
+
+        // Yield one tick so the browser finishes the focus transition.
+        window.setTimeout(() => {
+          const editor = this.app.workspace.activeEditor;
+          if (!editor?.editor || editor.file?.path !== file.path) {
+            return;
+          }
+
+          if (position === 'title-highlighted') {
+            // Title is already focused — just extend the selection.
+            const freshTitle = (editor instanceof MarkdownView ? editor : view)
+              .containerEl.querySelector<HTMLElement>('.inline-title');
+            if (freshTitle) {
+              const sel = window.getSelection();
+              if (sel) {
+                const range = document.createRange();
+                range.selectNodeContents(freshTitle);
+                sel.removeAllRanges();
+                sel.addRange(range);
+              }
+            }
+          } else {
+            // Body/end — pull focus away from the title into the editor.
+            // Editor.editor is guaranteed non-null by the check above.
+            const ed = editor.editor;
+            ed.focus();
+            if (position === 'end') {
+              const lastLine = ed.lineCount() - 1;
+              ed.setCursor({ ch: ed.getLine(lastLine).length, line: lastLine });
+            } else {
+              ed.setCursor(this.getBodyStart(editor));
+            }
+          }
+        }, 0);
+      };
+
+      titleEl.addEventListener('focus', onTitleFocus);
+
+      // On mobile, also intercept via Platform-specific check for extra safety.
+      if (Platform.isMobile) {
+        titleEl.focus();
+      }
+
+      window.setTimeout(() => {
+        titleEl.removeEventListener('focus', onTitleFocus);
+      }, INTERCEPT_TIMEOUT_MS);
+    }, 0);
   }
 
   protected override createSettingsManager(): PluginSettingsManager {
