@@ -18,3 +18,10 @@ export class Notice {
 export class Component {}
 export class Events {}
 export class WorkspaceLeaf {}
+
+export const Platform = {
+  isMobile: false,
+  isDesktop: true,
+  isIosApp: false,
+  isAndroidApp: false,
+};

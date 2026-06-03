@@ -1,5 +1,5 @@
 import type { App, TAbstractFile, TFile, WorkspaceLeaf } from 'obsidian';
-import { MarkdownView } from 'obsidian';
+import { MarkdownView, Platform } from 'obsidian';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { CursorPosition, CursorPositionOrNone } from './PluginSettings.ts';
@@ -66,6 +66,7 @@ function makePlugin(
     readFrontmatterKey: (Plugin.prototype as any).readFrontmatterKey,
     getBodyStart: Plugin.prototype.getBodyStart,
     setCursorPosition: Plugin.prototype.setCursorPosition,
+    scheduleMobilePosition: Plugin.prototype.scheduleMobilePosition,
     isExcluded: Plugin.prototype.isExcluded,
     findActiveMarkdownView: Plugin.prototype.findActiveMarkdownView,
     recentlyCreated: new Map<string, FileRecord>(),
@@ -441,29 +442,16 @@ describe('getBodyStart', () => {
 
 describe('setCursorPosition', () => {
   describe('title', () => {
-    beforeEach(() => { vi.useFakeTimers(); });
-
-    it('calls setEphemeralState synchronously then focuses and collapses selection after timeout', () => {
+    it('calls setEphemeralState and focuses inline-title synchronously', () => {
       const plugin = makePlugin();
       const view = makeView([]);
       plugin.setCursorPosition(view, 'title');
-      // setEphemeralState fires immediately
       expect(view.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'end' });
-      // focus / selection deferred
-      expect(view._titleEl.focus).not.toHaveBeenCalled();
-      vi.runAllTimers();
       expect(view._titleEl.focus).toHaveBeenCalled();
-    });
-
-    it('does not move the editor cursor', () => {
-      const plugin = makePlugin();
-      const view = makeView(['content']);
-      plugin.setCursorPosition(view, 'title');
-      vi.runAllTimers();
       expect(view.editor.setCursor).not.toHaveBeenCalled();
     });
 
-    it('falls back to body start synchronously when inline-title is absent', () => {
+    it('falls back to body start when inline-title is absent', () => {
       const plugin = makePlugin();
       const view = makeView(['content']);
       view.containerEl.querySelector = vi.fn().mockReturnValue(null);
@@ -474,19 +462,15 @@ describe('setCursorPosition', () => {
   });
 
   describe('title-highlighted', () => {
-    beforeEach(() => { vi.useFakeTimers(); });
-
-    it('calls setEphemeralState synchronously then focuses and selects all after timeout', () => {
+    it('calls setEphemeralState({ rename: "all" }), focuses, and selects all synchronously', () => {
       const plugin = makePlugin();
       const view = makeView([]);
       plugin.setCursorPosition(view, 'title-highlighted');
       expect(view.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'all' });
-      expect(view._titleEl.focus).not.toHaveBeenCalled();
-      vi.runAllTimers();
       expect(view._titleEl.focus).toHaveBeenCalled();
     });
 
-    it('falls back to body start synchronously when inline-title is absent', () => {
+    it('falls back to body start when inline-title is absent', () => {
       const plugin = makePlugin();
       const view = makeView(['---', 'title: T', '---', '', 'content']);
       view.containerEl.querySelector = vi.fn().mockReturnValue(null);
@@ -511,6 +495,133 @@ describe('setCursorPosition', () => {
       plugin.setCursorPosition(view, 'end');
       expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 9, line: 1 });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scheduleMobilePosition
+// ---------------------------------------------------------------------------
+
+describe('scheduleMobilePosition', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+
+  it('applies directly when inline-title is absent (no race condition)', () => {
+    const plugin = makePlugin();
+    const view = makeView(['content']);
+    view.containerEl.querySelector = vi.fn().mockReturnValue(null);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.scheduleMobilePosition(view, { path: 'test.md' } as TFile, 'body');
+    expect(spy).toHaveBeenCalledWith(view, 'body');
+  });
+
+  it('does nothing for title mode — Obsidian default already puts cursor at title end', () => {
+    const plugin = makePlugin();
+    const view = makeView([]);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.scheduleMobilePosition(view, { path: 'test.md' } as TFile, 'title');
+    vi.runAllTimers();
+    expect(spy).not.toHaveBeenCalled();
+    expect(view.editor.setCursor).not.toHaveBeenCalled();
+  });
+
+  it('redirects to body after title focus event fires', () => {
+    const plugin = makePlugin();
+    const view = makeView(['# Content']);
+    plugin.app.workspace.activeLeaf = { view } as any;
+    plugin.scheduleMobilePosition(view, { path: 'test.md' } as TFile, 'body');
+
+    // Simulate Obsidian focusing the inline title
+    view._titleEl.dispatchEvent(new Event('focus'));
+    vi.runAllTimers();
+
+    expect(view.editor.focus).toHaveBeenCalled();
+    expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
+  });
+
+  it('redirects to end after title focus event fires', () => {
+    const plugin = makePlugin();
+    const view = makeView(['first', 'last line']);
+    plugin.app.workspace.activeLeaf = { view } as any;
+    plugin.scheduleMobilePosition(view, { path: 'test.md' } as TFile, 'end');
+
+    view._titleEl.dispatchEvent(new Event('focus'));
+    vi.runAllTimers();
+
+    expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 9, line: 1 });
+  });
+
+  it('selects all in title after focus event for title-highlighted', () => {
+    const plugin = makePlugin();
+    const view = makeView([]);
+    plugin.app.workspace.activeLeaf = { view } as any;
+    plugin.scheduleMobilePosition(view, { path: 'test.md' } as TFile, 'title-highlighted');
+
+    view._titleEl.dispatchEvent(new Event('focus'));
+    vi.runAllTimers();
+
+    // Editor should NOT be focused (cursor stays in title)
+    expect(view.editor.focus).not.toHaveBeenCalled();
+    expect(view.editor.setCursor).not.toHaveBeenCalled();
+  });
+
+  it('does not fire twice if focus triggers multiple times (once: true)', () => {
+    const plugin = makePlugin();
+    const view = makeView(['content']);
+    plugin.app.workspace.activeLeaf = { view } as any;
+    plugin.scheduleMobilePosition(view, { path: 'test.md' } as TFile, 'body');
+
+    view._titleEl.dispatchEvent(new Event('focus'));
+    view._titleEl.dispatchEvent(new Event('focus'));
+    vi.runAllTimers();
+
+    // setCursor should only have been called once
+    expect(view.editor.setCursor).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans up listener after safety timeout if title never focused', () => {
+    const plugin = makePlugin();
+    const view = makeView(['content']);
+    const removeSpy = vi.spyOn(view._titleEl, 'removeEventListener');
+    plugin.scheduleMobilePosition(view, { path: 'test.md' } as TFile, 'body');
+
+    vi.advanceTimersByTime(2_000);
+
+    expect(removeSpy).toHaveBeenCalled();
+    // No cursor change since focus never fired
+    expect(view.editor.setCursor).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleFileOpen — mobile routing
+// ---------------------------------------------------------------------------
+
+describe('handleFileOpen mobile routing', () => {
+  beforeEach(() => {
+    Platform.isMobile = true;
+  });
+
+  afterEach = () => {
+    Platform.isMobile = false;
+  };
+
+  it('routes new notes to scheduleMobilePosition on mobile', () => {
+    const plugin = makePlugin('body');
+    plugin.recentlyCreated.set('test.md', rec());
+    const view = makeView(['content']);
+    plugin.app.workspace.activeLeaf = { view } as any;
+    const spy = vi.spyOn(plugin, 'scheduleMobilePosition').mockImplementation(() => undefined);
+    plugin.handleFileOpen({ path: 'test.md' } as TFile);
+    expect(spy).toHaveBeenCalledWith(view, { path: 'test.md' }, 'body');
+  });
+
+  it('uses setCursorPosition directly for existing notes on mobile (no race)', () => {
+    const plugin = makePlugin('title', 'body');
+    const view = makeView(['content']);
+    plugin.app.workspace.activeLeaf = { view } as any;
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.handleFileOpen({ path: 'test.md' } as TFile);
+    expect(spy).toHaveBeenCalledWith(view, 'body');
   });
 });
 

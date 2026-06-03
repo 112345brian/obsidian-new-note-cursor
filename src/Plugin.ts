@@ -1,6 +1,6 @@
 import type { TAbstractFile, TFile } from 'obsidian';
 
-import { MarkdownView } from 'obsidian';
+import { MarkdownView, Platform } from 'obsidian';
 import { PluginBase } from 'obsidian-dev-utils/obsidian/plugin/plugin-base';
 
 import type { CursorPosition, CursorPositionOrNone } from './PluginSettings.ts';
@@ -11,8 +11,10 @@ import { PluginSettingsTab } from './PluginSettingsTab.ts';
 
 const NEW_FILE_TTL_MS = 5_000;
 const TEMPLATER_DEFER_MS = 350;
+// If Obsidian never focuses the title (e.g. inline title was just toggled off),
+// clean up our interceptor after this long.
+const MOBILE_INTERCEPT_TIMEOUT_MS = 2_000;
 
-// All values accepted in frontmatter (includes 'none' to explicitly opt out)
 const VALID_FRONTMATTER_VALUES: readonly CursorPositionOrNone[] = [
   'title', 'body', 'end', 'title-highlighted', 'none',
 ];
@@ -57,13 +59,10 @@ export class Plugin extends PluginBase<PluginTypes> {
     const record = this.consumeRecord(file);
     const isNew = record !== null;
 
-    // (#5) Folder exclusions — skip entirely for excluded paths
     if (this.isExcluded(file)) {
       return;
     }
 
-    // (#6) Hover editor / popout window support: use activeLeaf rather than
-    // getActiveViewOfType so we cover every workspace root
     const view = this.findActiveMarkdownView(file);
     if (!view) {
       return;
@@ -75,7 +74,6 @@ export class Plugin extends PluginBase<PluginTypes> {
         if (!fresh) {
           return;
         }
-        // Only apply if the template explicitly declares cursor-position
         const override = this.getFrontmatterOverride(fresh, true);
         if (override && override !== 'none') {
           this.setCursorPosition(fresh, override);
@@ -85,9 +83,21 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
 
     const position = this.resolvePosition(view, isNew);
-    if (position !== 'none') {
-      this.setCursorPosition(view, position);
+    if (position === 'none') {
+      return;
     }
+
+    // On mobile, Obsidian asynchronously focuses the inline title after
+    // file-open for new notes — any cursor change we make here gets
+    // overridden. Instead of fighting the timing, we listen for the focus
+    // event Obsidian will trigger and redirect from inside that callback,
+    // so we are guaranteed to run last.
+    if (isNew && Platform.isMobile) {
+      this.scheduleMobilePosition(view, file, position);
+      return;
+    }
+
+    this.setCursorPosition(view, position);
   }
 
   public consumeRecord(file: TFile): FileRecord | null {
@@ -104,11 +114,6 @@ export class Plugin extends PluginBase<PluginTypes> {
       (isNew ? this.settings.onCreate : this.settings.onOpen);
   }
 
-  // (#2, #3) Read cursor position from frontmatter.
-  // Checks the event-specific key first (cursor-position-create / cursor-position-open),
-  // then falls back to the generic cursor-position key.
-  // Returns null when no key is present (use global setting).
-  // Returns 'none' when the note explicitly opts out.
   public getFrontmatterOverride(view: MarkdownView, isNew: boolean): CursorPositionOrNone | null {
     const specificKey = isNew ? 'cursor-position-create' : 'cursor-position-open';
     return this.readFrontmatterKey(view, specificKey)
@@ -131,6 +136,8 @@ export class Plugin extends PluginBase<PluginTypes> {
     return { ch: 0, line: 0 };
   }
 
+  // Synchronous cursor placement — used on desktop and for open events on mobile.
+  // For new notes on mobile use scheduleMobilePosition instead.
   public setCursorPosition(view: MarkdownView, position: CursorPosition): void {
     if (position === 'title' || position === 'title-highlighted') {
       const rename = position === 'title-highlighted' ? 'all' : 'end';
@@ -144,25 +151,17 @@ export class Plugin extends PluginBase<PluginTypes> {
         return;
       }
 
-      // Defer one frame so setEphemeralState has time to render the title
-      // element into its rename state before we manipulate the selection.
-      // This is what makes mobile work: setEphemeralState handles Obsidian's
-      // internal state (desktop), and the explicit Range selection below
-      // handles the actual DOM highlight (required on mobile WebView).
-      window.setTimeout(() => {
-        titleEl.focus();
+      titleEl.focus();
+
+      if (position === 'title-highlighted') {
         const sel = window.getSelection();
-        if (!sel) {
-          return;
+        if (sel) {
+          const range = document.createRange();
+          range.selectNodeContents(titleEl);
+          sel.removeAllRanges();
+          sel.addRange(range);
         }
-        const range = document.createRange();
-        range.selectNodeContents(titleEl);
-        if (position === 'title') {
-          range.collapse(false); // cursor at end, nothing selected
-        }
-        sel.removeAllRanges();
-        sel.addRange(range);
-      }, 0);
+      }
       return;
     }
 
@@ -180,6 +179,67 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
   }
 
+  // Mobile-specific handler for new note creation.
+  // Obsidian focuses the inline title asynchronously after file-open, overriding
+  // anything we set synchronously. We register a one-time focus listener on that
+  // element and apply our positioning from inside it — guaranteed to run after
+  // Obsidian finishes its own initialization.
+  public scheduleMobilePosition(view: MarkdownView, file: TFile, position: CursorPosition): void {
+    const titleEl = view.containerEl.querySelector<HTMLElement>('.inline-title');
+
+    if (!titleEl) {
+      // No race condition without an inline title — apply directly.
+      this.setCursorPosition(view, position);
+      return;
+    }
+
+    if (position === 'title') {
+      // Obsidian's default for new notes is already cursor-at-title-end.
+      return;
+    }
+
+    const onTitleFocused = (): void => {
+      // Yield one tick so the browser finishes the focus transition, then redirect.
+      window.setTimeout(() => {
+        const fresh = this.findActiveMarkdownView(file);
+        if (!fresh) {
+          return;
+        }
+
+        if (position === 'title-highlighted') {
+          // Title is already focused — just extend to a full selection.
+          const freshTitle = fresh.containerEl.querySelector<HTMLElement>('.inline-title');
+          if (freshTitle) {
+            const sel = window.getSelection();
+            if (sel) {
+              const range = document.createRange();
+              range.selectNodeContents(freshTitle);
+              sel.removeAllRanges();
+              sel.addRange(range);
+            }
+          }
+          return;
+        }
+
+        // body / end — move focus away from the title into the editor.
+        fresh.editor.focus();
+        if (position === 'end') {
+          const lastLine = fresh.editor.lineCount() - 1;
+          fresh.editor.setCursor({ ch: fresh.editor.getLine(lastLine).length, line: lastLine });
+        } else {
+          fresh.editor.setCursor(this.getBodyStart(fresh));
+        }
+      }, 0);
+    };
+
+    titleEl.addEventListener('focus', onTitleFocused, { once: true });
+
+    // Safety valve: if Obsidian never focuses the title (edge case), clean up.
+    window.setTimeout(() => {
+      titleEl.removeEventListener('focus', onTitleFocused);
+    }, MOBILE_INTERCEPT_TIMEOUT_MS);
+  }
+
   public templaterWillProcess(file: TFile): boolean {
     const plugin = (this.app as any).plugins?.plugins?.['templater-obsidian'];
     if (!plugin) {
@@ -191,7 +251,6 @@ export class Plugin extends PluginBase<PluginTypes> {
     return plugin.settings?.trigger_on_file_creation === true;
   }
 
-  // (#5) Returns true when the file's path falls under an excluded folder.
   public isExcluded(file: TFile): boolean {
     return this.settings.excludedFolders.some((folder) => {
       const normalized = folder.replace(/\/+$/, '');
@@ -202,8 +261,6 @@ export class Plugin extends PluginBase<PluginTypes> {
     });
   }
 
-  // (#6) Find the active MarkdownView for a file across all workspace roots
-  // (main window, popout windows, hover editors).
   public findActiveMarkdownView(file: TFile): MarkdownView | null {
     const leaf = (this.app.workspace as any).activeLeaf;
     if (!leaf) {
@@ -216,13 +273,11 @@ export class Plugin extends PluginBase<PluginTypes> {
     return view.file?.path === file.path ? view : null;
   }
 
-  // Scans frontmatter lines for a specific key and returns its value if valid.
   private readFrontmatterKey(view: MarkdownView, key: string): CursorPositionOrNone | null {
     const editor = view.editor;
     if (editor.lineCount() < 2 || editor.getLine(0).trim() !== '---') {
       return null;
     }
-    // Escape hyphens in key for use in regex
     const escapedKey = key.replace(/-/g, '\\-');
     const pattern = new RegExp(`^${escapedKey}:\\s*["']?([^"'\\s]+)["']?`);
     for (let i = 1; i < editor.lineCount(); i++) {
