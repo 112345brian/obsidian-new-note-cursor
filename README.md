@@ -1,4 +1,4 @@
-# New Note Cursor
+# Cursor Control
 
 An [Obsidian](https://obsidian.md) plugin that controls where the cursor lands when you create a new note.
 
@@ -16,7 +16,7 @@ Valid values: `title` · `body` · `end` · `title-highlighted`
 
 ## Settings
 
-Open **Settings → New Note Cursor** and choose one of three cursor behaviors:
+Open **Settings → Cursor Control** and choose one of three cursor behaviors:
 
 | Option | Behavior |
 |---|---|
@@ -36,13 +36,13 @@ The plugin is not yet listed in the official Community Plugins directory.
    ```
    https://github.com/112345brian/cursor-control
    ```
-3. Enable **New Note Cursor** in **Settings → Community plugins**.
+3. Enable **Cursor Control** in **Settings → Community plugins**.
 
 ### Manual
 
 1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/112345brian/cursor-control/releases/latest).
-2. Copy the three files into `<your vault>/.obsidian/plugins/new-note-cursor/`.
-3. Enable **New Note Cursor** in **Settings → Community plugins**.
+2. Copy the three files into `<your vault>/.obsidian/plugins/cursor-control/`.
+3. Enable **Cursor Control** in **Settings → Community plugins**.
 
 ## How it works
 
@@ -65,7 +65,7 @@ npm run dev    # watch mode — outputs to dist/build/
 npm run build  # production build
 ```
 
-Copy `dist/build/` into your vault's `.obsidian/plugins/new-note-cursor/` directory and reload Obsidian to test.
+Copy `dist/build/` into your vault's `.obsidian/plugins/cursor-control/` directory and reload Obsidian to test.
 
 ## License
 

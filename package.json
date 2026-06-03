@@ -1,7 +1,7 @@
 {
-  "name": "new-note-cursor",
-  "version": "0.0.0",
-  "description": "Sets cursor position when creating a new note.",
+  "name": "cursor-control",
+  "version": "0.3.0",
+  "description": "Control where the cursor lands when creating or opening notes.",
   "keywords": [],
   "license": "MIT",
   "author": "bripow",

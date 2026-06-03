@@ -1,10 +1,10 @@
 {
   "author": "112345brian",
   "authorUrl": "https://github.com/112345brian/",
-  "description": "Sets cursor position when creating a new note.",
-  "id": "new-note-cursor",
+  "description": "Control where the cursor lands when creating or opening notes.",
+  "id": "cursor-control",
   "isDesktopOnly": false,
-  "name": "New Note Cursor",
+  "name": "Cursor Control",
   "minAppVersion": "1.4.0",
-  "version": "0.2.0"
+  "version": "0.3.0"
 }
