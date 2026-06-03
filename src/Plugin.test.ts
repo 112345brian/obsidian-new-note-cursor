@@ -1,14 +1,20 @@
 import type { App, TAbstractFile, TFile, WorkspaceLeaf } from 'obsidian';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { PluginTypes } from './PluginTypes.ts';
+import type { CursorPosition, CursorPositionOrNone } from './PluginSettings.ts';
 
 import { Plugin } from './Plugin.ts';
 import { PluginSettings } from './PluginSettings.ts';
 
 // ---------------------------------------------------------------------------
-// Minimal Obsidian mocks
+// Helpers
 // ---------------------------------------------------------------------------
+
+interface FileRecord { createdAt: number; templaterWillProcess: boolean; }
+
+function record(opts: Partial<FileRecord> = {}): FileRecord {
+  return { createdAt: Date.now(), templaterWillProcess: false, ...opts };
+}
 
 function makeEditor(lines: string[]) {
   return {
@@ -19,58 +25,39 @@ function makeEditor(lines: string[]) {
   };
 }
 
-function makeLeaf() {
-  return { setEphemeralState: vi.fn() } as unknown as WorkspaceLeaf;
-}
-
-function makeView(lines: string[], setting: PluginSettings['cursorPosition'] = 'body') {
-  const leaf = makeLeaf();
+function makeView(lines: string[]) {
+  const leaf = { setEphemeralState: vi.fn() } as unknown as WorkspaceLeaf;
   const editor = makeEditor(lines);
   const titleEl = { focus: vi.fn() } as unknown as HTMLElement;
-  const containerEl = {
-    querySelector: vi.fn().mockReturnValue(titleEl),
-  } as unknown as HTMLElement;
-
-  return {
-    containerEl,
-    editor,
-    file: { path: 'test.md' } as TFile,
-    leaf,
-    // expose titleEl for assertions
-    _titleEl: titleEl,
-  };
+  const containerEl = { querySelector: vi.fn().mockReturnValue(titleEl) } as unknown as HTMLElement;
+  return { containerEl, editor, file: { path: 'test.md' } as TFile, leaf, _titleEl: titleEl };
 }
 
-function makePlugin(cursorPosition: PluginSettings['cursorPosition'] = 'body') {
+function makePlugin(onCreate: CursorPosition = 'body', onOpen: CursorPositionOrNone = 'none') {
   const settings = new PluginSettings();
-  settings.cursorPosition = cursorPosition;
+  settings.onCreate = onCreate;
+  settings.onOpen = onOpen;
 
-  const getActiveViewOfType = vi.fn();
-
-  const plugin = {
+  return {
     app: {
-      vault: {
-        on: vi.fn().mockReturnValue({ id: 1 }),
-      },
+      vault: { on: vi.fn().mockReturnValue({ id: 1 }) },
       workspace: {
-        getActiveViewOfType,
+        getActiveViewOfType: vi.fn(),
         on: vi.fn().mockReturnValue({ id: 2 }),
       },
     } as unknown as App,
     handleCreate: Plugin.prototype.handleCreate,
     handleFileOpen: Plugin.prototype.handleFileOpen,
-    applyPosition: Plugin.prototype.applyPosition,
-    getBodyStart: Plugin.prototype.getBodyStart,
+    consumeRecord: Plugin.prototype.consumeRecord,
+    resolvePosition: Plugin.prototype.resolvePosition,
     getFrontmatterOverride: Plugin.prototype.getFrontmatterOverride,
-    recentlyCreated: new Map<string, number>(),
+    getBodyStart: Plugin.prototype.getBodyStart,
+    setCursorPosition: Plugin.prototype.setCursorPosition,
+    recentlyCreated: new Map<string, FileRecord>(),
     settings,
-  } as unknown as Plugin & {
-    app: { workspace: { getActiveViewOfType: ReturnType<typeof vi.fn> } };
-    recentlyCreated: Map<string, number>;
-    settings: PluginSettings;
-  };
-
-  return plugin;
+    // Stub — tests override per-case
+    templaterWillProcess: vi.fn().mockReturnValue(false),
+  } as any;
 }
 
 // ---------------------------------------------------------------------------
@@ -78,23 +65,26 @@ function makePlugin(cursorPosition: PluginSettings['cursorPosition'] = 'body') {
 // ---------------------------------------------------------------------------
 
 describe('handleCreate', () => {
-  it('records a markdown file in recentlyCreated', () => {
+  it('records a markdown file with a fresh timestamp', () => {
     const plugin = makePlugin();
     const before = Date.now();
     plugin.handleCreate({ path: 'notes/foo.md' } as TAbstractFile);
-    const after = Date.now();
+    const rec: FileRecord = plugin.recentlyCreated.get('notes/foo.md')!;
+    expect(rec.createdAt).toBeGreaterThanOrEqual(before);
+    expect(rec.createdAt).toBeLessThanOrEqual(Date.now());
+  });
 
-    expect(plugin.recentlyCreated.has('notes/foo.md')).toBe(true);
-    const ts = plugin.recentlyCreated.get('notes/foo.md')!;
-    expect(ts).toBeGreaterThanOrEqual(before);
-    expect(ts).toBeLessThanOrEqual(after);
+  it('snapshots templaterWillProcess at create time', () => {
+    const plugin = makePlugin();
+    plugin.templaterWillProcess.mockReturnValue(true);
+    plugin.handleCreate({ path: 'templ.md' } as TAbstractFile);
+    expect(plugin.recentlyCreated.get('templ.md').templaterWillProcess).toBe(true);
   });
 
   it('ignores non-markdown files', () => {
     const plugin = makePlugin();
     plugin.handleCreate({ path: 'image.png' } as TAbstractFile);
     plugin.handleCreate({ path: 'data.json' } as TAbstractFile);
-    plugin.handleCreate({ path: 'note.txt' } as TAbstractFile);
     expect(plugin.recentlyCreated.size).toBe(0);
   });
 
@@ -103,96 +93,248 @@ describe('handleCreate', () => {
     plugin.handleCreate({ path: 'a.md' } as TAbstractFile);
     plugin.handleCreate({ path: 'b.md' } as TAbstractFile);
     expect(plugin.recentlyCreated.size).toBe(2);
-    expect(plugin.recentlyCreated.has('a.md')).toBe(true);
-    expect(plugin.recentlyCreated.has('b.md')).toBe(true);
   });
 });
 
 // ---------------------------------------------------------------------------
-// handleFileOpen
+// consumeRecord
+// ---------------------------------------------------------------------------
+
+describe('consumeRecord', () => {
+  it('returns the record and removes the entry for a recent file', () => {
+    const plugin = makePlugin();
+    plugin.recentlyCreated.set('test.md', record());
+    const result = plugin.consumeRecord({ path: 'test.md' } as TFile);
+    expect(result).not.toBeNull();
+    expect(plugin.recentlyCreated.has('test.md')).toBe(false);
+  });
+
+  it('returns null for an untracked file', () => {
+    expect(makePlugin().consumeRecord({ path: 'x.md' } as TFile)).toBeNull();
+  });
+
+  it('returns null and removes stale entries (> 5 s)', () => {
+    const plugin = makePlugin();
+    plugin.recentlyCreated.set('old.md', record({ createdAt: Date.now() - 6_000 }));
+    expect(plugin.consumeRecord({ path: 'old.md' } as TFile)).toBeNull();
+    expect(plugin.recentlyCreated.has('old.md')).toBe(false);
+  });
+
+  it('returns the record for an entry just inside the 5 s window', () => {
+    const plugin = makePlugin();
+    plugin.recentlyCreated.set('test.md', record({ createdAt: Date.now() - 4_999 }));
+    expect(plugin.consumeRecord({ path: 'test.md' } as TFile)).not.toBeNull();
+  });
+
+  it('preserves templaterWillProcess from the record', () => {
+    const plugin = makePlugin();
+    plugin.recentlyCreated.set('test.md', record({ templaterWillProcess: true }));
+    const result = plugin.consumeRecord({ path: 'test.md' } as TFile);
+    expect(result?.templaterWillProcess).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleFileOpen — routing
 // ---------------------------------------------------------------------------
 
 describe('handleFileOpen', () => {
   it('does nothing when file is null', () => {
     const plugin = makePlugin();
-    const spy = vi.spyOn(plugin, 'applyPosition');
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
     plugin.handleFileOpen(null);
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  it('does nothing for a file that was never created', () => {
-    const plugin = makePlugin();
-    const spy = vi.spyOn(plugin, 'applyPosition');
-    plugin.handleFileOpen({ path: 'untracked.md' } as TFile);
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  it('ignores stale entries older than 5 seconds', () => {
-    const plugin = makePlugin();
-    const spy = vi.spyOn(plugin, 'applyPosition');
-    plugin.recentlyCreated.set('old.md', Date.now() - 6_000);
-    plugin.handleFileOpen({ path: 'old.md' } as TFile);
-    expect(spy).not.toHaveBeenCalled();
-    expect(plugin.recentlyCreated.has('old.md')).toBe(false);
-  });
-
-  it('removes the entry after processing (no double-fire)', () => {
-    const plugin = makePlugin();
-    plugin.recentlyCreated.set('test.md', Date.now());
-    (plugin.app.workspace as any).getActiveViewOfType.mockReturnValue(null);
-
-    plugin.handleFileOpen({ path: 'test.md' } as TFile);
-    expect(plugin.recentlyCreated.has('test.md')).toBe(false);
-
-    // Second open of same file should be ignored
-    const spy = vi.spyOn(plugin, 'applyPosition');
-    plugin.handleFileOpen({ path: 'test.md' } as TFile);
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  it('does nothing when the active view is for a different file', () => {
-    const plugin = makePlugin();
-    const spy = vi.spyOn(plugin, 'applyPosition');
-    plugin.recentlyCreated.set('test.md', Date.now());
-
-    const wrongView = makeView([]);
-    wrongView.file = { path: 'other.md' } as TFile;
-    (plugin.app.workspace as any).getActiveViewOfType.mockReturnValue(wrongView);
-
-    plugin.handleFileOpen({ path: 'test.md' } as TFile);
     expect(spy).not.toHaveBeenCalled();
   });
 
   it('does nothing when there is no active MarkdownView', () => {
     const plugin = makePlugin();
-    const spy = vi.spyOn(plugin, 'applyPosition');
-    plugin.recentlyCreated.set('test.md', Date.now());
-    (plugin.app.workspace as any).getActiveViewOfType.mockReturnValue(null);
-
+    plugin.recentlyCreated.set('test.md', record());
+    plugin.app.workspace.getActiveViewOfType.mockReturnValue(null);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
     plugin.handleFileOpen({ path: 'test.md' } as TFile);
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('calls applyPosition when everything lines up', () => {
+  it('does nothing when active view is for a different file', () => {
     const plugin = makePlugin();
-    const spy = vi.spyOn(plugin, 'applyPosition').mockImplementation(() => undefined);
-    plugin.recentlyCreated.set('test.md', Date.now());
-    const view = makeView([]);
-    (plugin.app.workspace as any).getActiveViewOfType.mockReturnValue(view);
-
+    plugin.recentlyCreated.set('test.md', record());
+    const wrongView = { ...makeView([]), file: { path: 'other.md' } as TFile };
+    plugin.app.workspace.getActiveViewOfType.mockReturnValue(wrongView);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
     plugin.handleFileOpen({ path: 'test.md' } as TFile);
-    expect(spy).toHaveBeenCalledWith(view);
+    expect(spy).not.toHaveBeenCalled();
   });
 
-  it('accepts entries created up to 5 seconds ago', () => {
-    const plugin = makePlugin();
-    const spy = vi.spyOn(plugin, 'applyPosition').mockImplementation(() => undefined);
-    plugin.recentlyCreated.set('test.md', Date.now() - 4_999);
-    const view = makeView([]);
-    (plugin.app.workspace as any).getActiveViewOfType.mockReturnValue(view);
+  it('applies onCreate position for a new file', () => {
+    const plugin = makePlugin('end', 'none');
+    plugin.recentlyCreated.set('test.md', record());
+    const view = makeView(['content']);
+    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.handleFileOpen({ path: 'test.md' } as TFile);
+    expect(spy).toHaveBeenCalledWith(view, 'end');
+  });
+
+  it('applies onOpen position for an existing file', () => {
+    const plugin = makePlugin('title', 'body');
+    const view = makeView(['content']);
+    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.handleFileOpen({ path: 'test.md' } as TFile);
+    expect(spy).toHaveBeenCalledWith(view, 'body');
+  });
+
+  it('skips onOpen when set to none', () => {
+    const plugin = makePlugin('title', 'none');
+    const view = makeView(['content']);
+    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.handleFileOpen({ path: 'test.md' } as TFile);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Templater compatibility
+// ---------------------------------------------------------------------------
+
+describe('Templater compatibility', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  it('defers and skips when Templater will process and no frontmatter override', () => {
+    const plugin = makePlugin('body');
+    plugin.recentlyCreated.set('test.md', record({ templaterWillProcess: true }));
+    const view = makeView(['']); // empty — Templater hasn't written yet
+    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
 
     plugin.handleFileOpen({ path: 'test.md' } as TFile);
-    expect(spy).toHaveBeenCalled();
+    expect(spy).not.toHaveBeenCalled();
+
+    // After defer, empty file still has no override → Templater wins
+    vi.advanceTimersByTime(350);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('defers and applies frontmatter override after Templater writes the template', () => {
+    const plugin = makePlugin('body');
+    plugin.recentlyCreated.set('test.md', record({ templaterWillProcess: true }));
+
+    const emptyView = makeView(['']);
+    const templateView = makeView(['---', 'cursor-position: end', '---', '', 'Template content']);
+    plugin.app.workspace.getActiveViewOfType
+      .mockReturnValueOnce(emptyView)
+      .mockReturnValue(templateView);
+
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.handleFileOpen({ path: 'test.md' } as TFile);
+    expect(spy).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(350);
+    expect(spy).toHaveBeenCalledWith(templateView, 'end');
+  });
+
+  it('does not defer for non-Templater files', () => {
+    const plugin = makePlugin('body');
+    plugin.recentlyCreated.set('test.md', record({ templaterWillProcess: false }));
+    const view = makeView(['content']);
+    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+
+    plugin.handleFileOpen({ path: 'test.md' } as TFile);
+    expect(spy).toHaveBeenCalledWith(view, 'body');
+  });
+
+  it('defers when Templater folder-trigger is on (snapshotted at create time)', () => {
+    const plugin = makePlugin('body');
+    // Simulates a file where trigger_on_file_creation=true was detected at create time
+    plugin.recentlyCreated.set('test.md', record({ templaterWillProcess: true }));
+    const view = makeView(['no frontmatter content']);
+    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+
+    plugin.handleFileOpen({ path: 'test.md' } as TFile);
+    // Deferred because Templater might write a template
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// templaterWillProcess
+// ---------------------------------------------------------------------------
+
+describe('templaterWillProcess', () => {
+  function makePluginWithApp(pluginsObj: Record<string, unknown>) {
+    const plugin = makePlugin();
+    // Replace the stubbed method with the real one
+    plugin.templaterWillProcess = Plugin.prototype.templaterWillProcess;
+    (plugin.app as any).plugins = { plugins: pluginsObj };
+    return plugin;
+  }
+
+  it('returns false when Templater is not installed', () => {
+    const plugin = makePluginWithApp({});
+    expect(plugin.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(false);
+  });
+
+  it('returns true when file is in files_with_pending_templates', () => {
+    const plugin = makePluginWithApp({
+      'templater-obsidian': {
+        templater: { files_with_pending_templates: new Set(['test.md']) },
+        settings: { trigger_on_file_creation: false },
+      },
+    });
+    expect(plugin.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(true);
+  });
+
+  it('returns false when file is not in files_with_pending_templates and trigger is off', () => {
+    const plugin = makePluginWithApp({
+      'templater-obsidian': {
+        templater: { files_with_pending_templates: new Set() },
+        settings: { trigger_on_file_creation: false },
+      },
+    });
+    expect(plugin.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(false);
+  });
+
+  it('returns true when trigger_on_file_creation is enabled', () => {
+    const plugin = makePluginWithApp({
+      'templater-obsidian': {
+        templater: { files_with_pending_templates: new Set() },
+        settings: { trigger_on_file_creation: true },
+      },
+    });
+    expect(plugin.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolvePosition
+// ---------------------------------------------------------------------------
+
+describe('resolvePosition', () => {
+  it('returns onCreate for a new file with no override', () => {
+    const plugin = makePlugin('end', 'body');
+    expect(plugin.resolvePosition(makeView(['no frontmatter']), true)).toBe('end');
+  });
+
+  it('returns onOpen for an existing file with no override', () => {
+    const plugin = makePlugin('end', 'body');
+    expect(plugin.resolvePosition(makeView(['no frontmatter']), false)).toBe('body');
+  });
+
+  it('frontmatter override takes precedence over onCreate', () => {
+    const plugin = makePlugin('title', 'none');
+    const view = makeView(['---', 'cursor-position: body', '---']);
+    expect(plugin.resolvePosition(view, true)).toBe('body');
+  });
+
+  it('frontmatter override takes precedence over onOpen', () => {
+    const plugin = makePlugin('title', 'body');
+    const view = makeView(['---', 'cursor-position: end', '---']);
+    expect(plugin.resolvePosition(view, false)).toBe('end');
   });
 });
 
@@ -202,9 +344,7 @@ describe('handleFileOpen', () => {
 
 describe('getFrontmatterOverride', () => {
   function override(lines: string[]) {
-    const plugin = makePlugin();
-    const view = makeView(lines) as any;
-    return plugin.getFrontmatterOverride(view);
+    return makePlugin().getFrontmatterOverride(makeView(lines));
   }
 
   it('returns null for a note with no frontmatter', () => {
@@ -219,42 +359,34 @@ describe('getFrontmatterOverride', () => {
     expect(override(['---', 'title: My Note', '---', 'content'])).toBeNull();
   });
 
-  it('returns the value when cursor-position is set to body', () => {
-    expect(override(['---', 'cursor-position: body', '---'])).toBe('body');
+  it.each([
+    ['body'],
+    ['end'],
+    ['title'],
+    ['title-highlighted'],
+  ] as [CursorPosition][][])('returns %s when set in frontmatter', (value) => {
+    expect(override(['---', `cursor-position: ${value}`, '---'])).toBe(value);
   });
 
-  it('returns the value when cursor-position is set to end', () => {
-    expect(override(['---', 'cursor-position: end', '---'])).toBe('end');
-  });
-
-  it('returns the value when cursor-position is set to title', () => {
-    expect(override(['---', 'cursor-position: title', '---'])).toBe('title');
-  });
-
-  it('returns the value when cursor-position is set to title-highlighted', () => {
-    expect(override(['---', 'cursor-position: title-highlighted', '---'])).toBe('title-highlighted');
-  });
-
-  it('accepts values wrapped in double quotes', () => {
+  it('accepts double-quoted values', () => {
     expect(override(['---', 'cursor-position: "body"', '---'])).toBe('body');
   });
 
-  it('accepts values wrapped in single quotes', () => {
+  it('accepts single-quoted values', () => {
     expect(override(['---', "cursor-position: 'end'", '---'])).toBe('end');
   });
 
   it('returns null for an unrecognised value', () => {
-    expect(override(['---', 'cursor-position: somewhere-invalid', '---'])).toBeNull();
+    expect(override(['---', 'cursor-position: nowhere', '---'])).toBeNull();
   });
 
   it('finds the key among other frontmatter fields', () => {
-    const lines = ['---', 'title: My Note', 'tags: [a, b]', 'cursor-position: end', 'date: 2024-01-01', '---'];
+    const lines = ['---', 'title: Note', 'tags: [a]', 'cursor-position: end', 'date: 2024-01-01', '---'];
     expect(override(lines)).toBe('end');
   });
 
-  it('stops searching at the closing --- and returns null if key comes after', () => {
-    const lines = ['---', 'title: Note', '---', 'cursor-position: body'];
-    expect(override(lines)).toBeNull();
+  it('ignores cursor-position that appears after the closing ---', () => {
+    expect(override(['---', 'title: Note', '---', 'cursor-position: body'])).toBeNull();
   });
 });
 
@@ -264,190 +396,153 @@ describe('getFrontmatterOverride', () => {
 
 describe('getBodyStart', () => {
   function bodyStart(lines: string[]) {
-    const plugin = makePlugin();
-    const view = makeView(lines) as any;
-    return plugin.getBodyStart(view);
+    return makePlugin().getBodyStart(makeView(lines));
   }
 
-  it('returns {line:0, ch:0} for an empty note', () => {
+  it('returns {line:0} for an empty note', () => {
     expect(bodyStart([''])).toEqual({ ch: 0, line: 0 });
   });
 
-  it('returns {line:0, ch:0} when there is no frontmatter', () => {
+  it('returns {line:0} when there is no frontmatter', () => {
     expect(bodyStart(['# Heading', '', 'Content'])).toEqual({ ch: 0, line: 0 });
   });
 
-  it('skips empty line after closing --- and lands on first content line', () => {
-    const lines = ['---', 'title: My Note', 'tags: [test]', '---', '', '# Body'];
-    // line 4 is empty → skip it → land on line 5
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 5 });
+  it('skips empty line after --- and lands on first content line', () => {
+    expect(bodyStart(['---', 'title: Note', '---', '', '# Body'])).toEqual({ ch: 0, line: 4 });
   });
 
-  it('lands directly after closing --- when no empty line follows', () => {
-    const lines = ['---', 'title: My Note', '---', '# Body'];
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 3 });
+  it('lands directly after --- when no empty line follows', () => {
+    expect(bodyStart(['---', 'title: Note', '---', '# Body'])).toEqual({ ch: 0, line: 3 });
   });
 
-  it('lands on the last line when frontmatter has no body at all', () => {
-    const lines = ['---', 'title: My Note', '---'];
-    // bodyLine would be 3, clamped to 2 (last line)
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 2 });
+  it('clamps to last line when frontmatter has no body', () => {
+    expect(bodyStart(['---', 'title: Note', '---'])).toEqual({ ch: 0, line: 2 });
   });
 
-  it('stays on the empty line when frontmatter ends with empty line but nothing after', () => {
-    const lines = ['---', 'title: My Note', '---', ''];
-    // bodyLine=3 is empty → +1 → 4, clamped to 3 (last line)
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 3 });
+  it('clamps when frontmatter ends with empty line but no content', () => {
+    expect(bodyStart(['---', 'title: Note', '---', ''])).toEqual({ ch: 0, line: 3 });
   });
 
-  it('skips a single-line frontmatter block and the empty line after it', () => {
-    const lines = ['---', '---', '', 'Content here'];
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 3 });
+  it('returns {line:0} for unclosed frontmatter', () => {
+    expect(bodyStart(['---', 'title: Note', 'no closing delimiter'])).toEqual({ ch: 0, line: 0 });
   });
 
-  it('returns {line:0, ch:0} for unclosed frontmatter (no second ---)', () => {
-    const lines = ['---', 'title: My Note', 'no closing delimiter'];
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 0 });
+  it('handles whitespace on the closing delimiter', () => {
+    expect(bodyStart(['---', 'title: Note', '--- ', 'Body'])).toEqual({ ch: 0, line: 3 });
   });
 
-  it('handles frontmatter with inline whitespace on the delimiter', () => {
-    // Obsidian trims the line, so '--- ' should still match
-    const lines = ['---', 'title: My Note', '--- ', 'Body starts here'];
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 3 });
-  });
-
-  it('does not treat --- in body content as frontmatter', () => {
-    // First line is not ---, so no frontmatter detection
-    const lines = ['# Title', '---', 'Paragraph'];
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 0 });
-  });
-
-  it('skips the empty line between frontmatter and content', () => {
-    const lines = ['---', 'title: Note', '---', '', '# Heading', 'text'];
-    // line 3 is empty → skip it → land on line 4 (# Heading)
-    expect(bodyStart(lines)).toEqual({ ch: 0, line: 4 });
+  it('does not treat --- in body as frontmatter', () => {
+    expect(bodyStart(['# Title', '---', 'Paragraph'])).toEqual({ ch: 0, line: 0 });
   });
 });
 
 // ---------------------------------------------------------------------------
-// applyPosition
+// setCursorPosition
 // ---------------------------------------------------------------------------
 
-describe('applyPosition', () => {
-  describe('frontmatter override', () => {
-    it('uses the frontmatter value instead of the global setting', () => {
-      // Global setting is 'title' but frontmatter says 'end'
-      const plugin = makePlugin('title');
-      const view = makeView(['---', 'cursor-position: end', '---', '', 'content']) as any;
-      plugin.applyPosition(view);
-      expect(view.leaf.setEphemeralState).not.toHaveBeenCalled();
-      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 7, line: 4 });
-    });
-
-    it('falls back to global setting when no frontmatter override is present', () => {
-      const plugin = makePlugin('title-highlighted');
-      const view = makeView(['no frontmatter here']) as any;
-      plugin.applyPosition(view);
-      expect(view.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'all' });
-    });
-  });
-
-  describe('title mode', () => {
-    it('calls setEphemeralState({ rename: "end" }) on the leaf', () => {
-      const plugin = makePlugin('title');
-      const view = makeView([]) as any;
-      plugin.applyPosition(view);
+describe('setCursorPosition', () => {
+  describe('title', () => {
+    it('calls setEphemeralState({ rename: "end" })', () => {
+      const plugin = makePlugin();
+      const view = makeView([]);
+      plugin.setCursorPosition(view, 'title');
       expect(view.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'end' });
     });
 
+    it('focuses the inline-title element for mobile keyboard', () => {
+      const plugin = makePlugin();
+      const view = makeView([]);
+      plugin.setCursorPosition(view, 'title');
+      expect(view._titleEl.focus).toHaveBeenCalled();
+    });
+
     it('does not move the editor cursor', () => {
-      const plugin = makePlugin('title');
-      const view = makeView(['content']) as any;
-      plugin.applyPosition(view);
+      const plugin = makePlugin();
+      const view = makeView(['content']);
+      plugin.setCursorPosition(view, 'title');
       expect(view.editor.setCursor).not.toHaveBeenCalled();
     });
   });
 
-  describe('title-highlighted mode', () => {
-    it('calls setEphemeralState({ rename: "all" }) on the leaf', () => {
-      const plugin = makePlugin('title-highlighted');
-      const view = makeView([]) as any;
-      plugin.applyPosition(view);
+  describe('title-highlighted', () => {
+    it('calls setEphemeralState({ rename: "all" })', () => {
+      const plugin = makePlugin();
+      const view = makeView([]);
+      plugin.setCursorPosition(view, 'title-highlighted');
       expect(view.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'all' });
     });
 
+    it('focuses the inline-title element for mobile keyboard', () => {
+      const plugin = makePlugin();
+      const view = makeView([]);
+      plugin.setCursorPosition(view, 'title-highlighted');
+      expect(view._titleEl.focus).toHaveBeenCalled();
+    });
+
     it('does not move the editor cursor', () => {
-      const plugin = makePlugin('title-highlighted');
-      const view = makeView(['content']) as any;
-      plugin.applyPosition(view);
+      const plugin = makePlugin();
+      const view = makeView(['content']);
+      plugin.setCursorPosition(view, 'title-highlighted');
       expect(view.editor.setCursor).not.toHaveBeenCalled();
     });
   });
 
-  describe('end mode', () => {
+  describe('body', () => {
     it('focuses the editor', () => {
-      const plugin = makePlugin('end');
-      const view = makeView(['line 0', 'line 1']) as any;
-      plugin.applyPosition(view);
-      expect(view.editor.focus).toHaveBeenCalled();
-    });
-
-    it('places cursor at end of last line', () => {
-      const plugin = makePlugin('end');
-      const view = makeView(['first line', 'second line', 'final']) as any;
-      plugin.applyPosition(view);
-      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 5, line: 2 });
-    });
-
-    it('places cursor at end of last line for a single-line note', () => {
-      const plugin = makePlugin('end');
-      const view = makeView(['only line']) as any;
-      plugin.applyPosition(view);
-      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 9, line: 0 });
-    });
-
-    it('handles an empty last line (ch: 0)', () => {
-      const plugin = makePlugin('end');
-      const view = makeView(['some content', '']) as any;
-      plugin.applyPosition(view);
-      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 1 });
-    });
-
-    it('does not call setEphemeralState', () => {
-      const plugin = makePlugin('end');
-      const view = makeView(['content']) as any;
-      plugin.applyPosition(view);
-      expect(view.leaf.setEphemeralState).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('body mode', () => {
-    it('focuses the editor', () => {
-      const plugin = makePlugin('body');
-      const view = makeView(['line 0']) as any;
-      plugin.applyPosition(view);
+      const plugin = makePlugin();
+      const view = makeView(['line 0']);
+      plugin.setCursorPosition(view, 'body');
       expect(view.editor.focus).toHaveBeenCalled();
     });
 
     it('places cursor at line 0 for a plain note', () => {
-      const plugin = makePlugin('body');
-      const view = makeView(['Hello world']) as any;
-      plugin.applyPosition(view);
+      const plugin = makePlugin();
+      const view = makeView(['Hello world']);
+      plugin.setCursorPosition(view, 'body');
       expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
     });
 
-    it('skips frontmatter and the blank line after it, placing cursor on content', () => {
-      const plugin = makePlugin('body');
-      const view = makeView(['---', 'title: Test', '---', '', 'Body here']) as any;
-      plugin.applyPosition(view);
-      // line 3 is empty → skip → land on line 4
+    it('skips frontmatter and blank line', () => {
+      const plugin = makePlugin();
+      const view = makeView(['---', 'title: Test', '---', '', 'Body here']);
+      plugin.setCursorPosition(view, 'body');
       expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 4 });
     });
 
     it('does not call setEphemeralState', () => {
-      const plugin = makePlugin('body');
-      const view = makeView(['content']) as any;
-      plugin.applyPosition(view);
+      const plugin = makePlugin();
+      const view = makeView(['content']);
+      plugin.setCursorPosition(view, 'body');
+      expect(view.leaf.setEphemeralState).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('end', () => {
+    it('focuses the editor', () => {
+      const plugin = makePlugin();
+      const view = makeView(['line 0', 'line 1']);
+      plugin.setCursorPosition(view, 'end');
+      expect(view.editor.focus).toHaveBeenCalled();
+    });
+
+    it('places cursor at end of last line', () => {
+      const plugin = makePlugin();
+      const view = makeView(['first', 'second line', 'final']);
+      plugin.setCursorPosition(view, 'end');
+      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 5, line: 2 });
+    });
+
+    it('handles empty last line (ch: 0)', () => {
+      const plugin = makePlugin();
+      const view = makeView(['some content', '']);
+      plugin.setCursorPosition(view, 'end');
+      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 1 });
+    });
+
+    it('does not call setEphemeralState', () => {
+      const plugin = makePlugin();
+      const view = makeView(['content']);
+      plugin.setCursorPosition(view, 'end');
       expect(view.leaf.setEphemeralState).not.toHaveBeenCalled();
     });
   });

@@ -1,5 +1,7 @@
-export type CursorPosition = 'title' | 'body' | 'title-highlighted' | 'end';
+export type CursorPosition = 'title' | 'body' | 'end' | 'title-highlighted';
+export type CursorPositionOrNone = CursorPosition | 'none';
 
 export class PluginSettings {
-  public cursorPosition: CursorPosition = 'title';
+  public onCreate: CursorPosition = 'title';
+  public onOpen: CursorPositionOrNone = 'none';
 }

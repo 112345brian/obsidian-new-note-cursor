@@ -3,23 +3,30 @@ import type { TAbstractFile, TFile } from 'obsidian';
 import { MarkdownView } from 'obsidian';
 import { PluginBase } from 'obsidian-dev-utils/obsidian/plugin/plugin-base';
 
-import type { CursorPosition } from './PluginSettings.ts';
+import type { CursorPosition, CursorPositionOrNone } from './PluginSettings.ts';
 import type { PluginTypes } from './PluginTypes.ts';
 
 import { PluginSettingsManager } from './PluginSettingsManager.ts';
 import { PluginSettingsTab } from './PluginSettingsTab.ts';
 
-// How long after creation we'll still treat a file-open as "new note"
 const NEW_FILE_TTL_MS = 5_000;
 
-// Frontmatter key users can set in individual notes to override the global setting.
-// Example: cursor-position: body
 export const FRONTMATTER_KEY = 'cursor-position';
 
 const VALID_POSITIONS: readonly CursorPosition[] = ['title', 'body', 'end', 'title-highlighted'];
 
+// Templater waits 300 ms before writing templates; we wait a bit longer.
+const TEMPLATER_DEFER_MS = 350;
+
+interface FileRecord {
+  createdAt: number;
+  // Snapshot of Templater state at vault.on('create') time — avoids a
+  // second lookup at file-open time when the set may have changed.
+  templaterWillProcess: boolean;
+}
+
 export class Plugin extends PluginBase<PluginTypes> {
-  private readonly recentlyCreated = new Map<string, number>();
+  private readonly recentlyCreated = new Map<string, FileRecord>();
 
   protected override createSettingsManager(): PluginSettingsManager {
     return new PluginSettingsManager(this);
@@ -42,9 +49,18 @@ export class Plugin extends PluginBase<PluginTypes> {
   }
 
   public handleCreate(file: TAbstractFile): void {
-    if (file.path.endsWith('.md')) {
-      this.recentlyCreated.set(file.path, Date.now());
+    if (!file.path.endsWith('.md')) {
+      return;
     }
+
+    // Snapshot Templater state right now, at creation time:
+    //  - files_with_pending_templates: explicit template creation flow
+    //  - trigger_on_file_creation: folder-trigger flow (Templater adds to the
+    //    set only after its own 300ms delay, so we'd miss it at file-open time)
+    this.recentlyCreated.set(file.path, {
+      createdAt: Date.now(),
+      templaterWillProcess: this.templaterWillProcess(file as TFile),
+    });
   }
 
   public handleFileOpen(file: TFile | null): void {
@@ -52,28 +68,58 @@ export class Plugin extends PluginBase<PluginTypes> {
       return;
     }
 
-    const createdAt = this.recentlyCreated.get(file.path);
-    if (createdAt === undefined) {
-      return;
-    }
-
-    if (Date.now() - createdAt > NEW_FILE_TTL_MS) {
-      this.recentlyCreated.delete(file.path);
-      return;
-    }
-
-    this.recentlyCreated.delete(file.path);
+    const record = this.consumeRecord(file);
+    const isNew = record !== null;
 
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!view || view.file?.path !== file.path) {
       return;
     }
 
-    this.applyPosition(view);
+    if (isNew && record.templaterWillProcess) {
+      // Templater will write template content and place its own cursor.
+      // Defer past its 300ms delay. Only apply if the template has an
+      // explicit cursor-position key — otherwise Templater owns the cursor.
+      window.setTimeout(() => {
+        const fresh = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!fresh || fresh.file?.path !== file.path) {
+          return;
+        }
+        const override = this.getFrontmatterOverride(fresh);
+        if (override) {
+          this.setCursorPosition(fresh, override);
+        }
+      }, TEMPLATER_DEFER_MS);
+      return;
+    }
+
+    const position = this.resolvePosition(view, isNew);
+    if (position !== 'none') {
+      this.setCursorPosition(view, position);
+    }
   }
 
-  // Read cursor-position from the note's own frontmatter, parsed directly
-  // from editor lines so there's no metadata-cache timing risk on fresh files.
+  // Removes and returns the record if the file was recently created, or null.
+  public consumeRecord(file: TFile): FileRecord | null {
+    const record = this.recentlyCreated.get(file.path);
+    if (!record) {
+      return null;
+    }
+    this.recentlyCreated.delete(file.path);
+    if (Date.now() - record.createdAt > NEW_FILE_TTL_MS) {
+      return null;
+    }
+    return record;
+  }
+
+  public resolvePosition(view: MarkdownView, isNew: boolean): CursorPositionOrNone {
+    const override = this.getFrontmatterOverride(view);
+    if (override) {
+      return override;
+    }
+    return isNew ? this.settings.onCreate : this.settings.onOpen;
+  }
+
   public getFrontmatterOverride(view: MarkdownView): CursorPosition | null {
     const editor = view.editor;
 
@@ -84,7 +130,6 @@ export class Plugin extends PluginBase<PluginTypes> {
     for (let i = 1; i < editor.lineCount(); i++) {
       const line = editor.getLine(i);
 
-      // Stop at closing delimiter
       if (line.trim() === '---') {
         break;
       }
@@ -119,30 +164,45 @@ export class Plugin extends PluginBase<PluginTypes> {
     return { ch: 0, line: 0 };
   }
 
-  public applyPosition(view: MarkdownView): void {
-    const cursorPosition = this.getFrontmatterOverride(view) ?? this.settings.cursorPosition;
-
-    if (cursorPosition === 'title') {
+  public setCursorPosition(view: MarkdownView, position: CursorPosition): void {
+    if (position === 'title') {
       view.leaf.setEphemeralState({ rename: 'end' });
+      view.containerEl.querySelector<HTMLElement>('.inline-title')?.focus();
       return;
     }
 
-    if (cursorPosition === 'title-highlighted') {
+    if (position === 'title-highlighted') {
       view.leaf.setEphemeralState({ rename: 'all' });
+      view.containerEl.querySelector<HTMLElement>('.inline-title')?.focus();
       return;
     }
 
-    if (cursorPosition === 'body') {
+    if (position === 'body') {
       view.editor.focus();
       view.editor.setCursor(this.getBodyStart(view));
       return;
     }
 
-    if (cursorPosition === 'end') {
+    if (position === 'end') {
       const editor = view.editor;
       const lastLine = editor.lineCount() - 1;
       editor.focus();
       editor.setCursor({ ch: editor.getLine(lastLine).length, line: lastLine });
     }
+  }
+
+  // Returns true if Templater is installed and will process this file:
+  // - explicit template creation: already in files_with_pending_templates
+  // - folder-trigger: trigger_on_file_creation is on (Templater adds to the
+  //   pending set only after its own 300ms delay, so we must decide here)
+  public templaterWillProcess(file: TFile): boolean {
+    const plugin = (this.app as any).plugins?.plugins?.['templater-obsidian'];
+    if (!plugin) {
+      return false;
+    }
+    if (plugin.templater?.files_with_pending_templates?.has(file.path)) {
+      return true;
+    }
+    return plugin.settings?.trigger_on_file_creation === true;
   }
 }
