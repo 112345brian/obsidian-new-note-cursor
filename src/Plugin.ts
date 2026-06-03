@@ -10,18 +10,15 @@ import { PluginSettingsManager } from './PluginSettingsManager.ts';
 import { PluginSettingsTab } from './PluginSettingsTab.ts';
 
 const NEW_FILE_TTL_MS = 5_000;
-
-export const FRONTMATTER_KEY = 'cursor-position';
-
-const VALID_POSITIONS: readonly CursorPosition[] = ['title', 'body', 'end', 'title-highlighted'];
-
-// Templater waits 300 ms before writing templates; we wait a bit longer.
 const TEMPLATER_DEFER_MS = 350;
+
+// All values accepted in frontmatter (includes 'none' to explicitly opt out)
+const VALID_FRONTMATTER_VALUES: readonly CursorPositionOrNone[] = [
+  'title', 'body', 'end', 'title-highlighted', 'none',
+];
 
 interface FileRecord {
   createdAt: number;
-  // Snapshot of Templater state at vault.on('create') time — avoids a
-  // second lookup at file-open time when the set may have changed.
   templaterWillProcess: boolean;
 }
 
@@ -38,25 +35,14 @@ export class Plugin extends PluginBase<PluginTypes> {
 
   protected override async onloadImpl(): Promise<void> {
     await super.onloadImpl();
-
-    this.registerEvent(
-      this.app.vault.on('create', this.handleCreate.bind(this))
-    );
-
-    this.registerEvent(
-      this.app.workspace.on('file-open', this.handleFileOpen.bind(this))
-    );
+    this.registerEvent(this.app.vault.on('create', this.handleCreate.bind(this)));
+    this.registerEvent(this.app.workspace.on('file-open', this.handleFileOpen.bind(this)));
   }
 
   public handleCreate(file: TAbstractFile): void {
     if (!file.path.endsWith('.md')) {
       return;
     }
-
-    // Snapshot Templater state right now, at creation time:
-    //  - files_with_pending_templates: explicit template creation flow
-    //  - trigger_on_file_creation: folder-trigger flow (Templater adds to the
-    //    set only after its own 300ms delay, so we'd miss it at file-open time)
     this.recentlyCreated.set(file.path, {
       createdAt: Date.now(),
       templaterWillProcess: this.templaterWillProcess(file as TFile),
@@ -71,22 +57,27 @@ export class Plugin extends PluginBase<PluginTypes> {
     const record = this.consumeRecord(file);
     const isNew = record !== null;
 
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!view || view.file?.path !== file.path) {
+    // (#5) Folder exclusions — skip entirely for excluded paths
+    if (this.isExcluded(file)) {
+      return;
+    }
+
+    // (#6) Hover editor / popout window support: use activeLeaf rather than
+    // getActiveViewOfType so we cover every workspace root
+    const view = this.findActiveMarkdownView(file);
+    if (!view) {
       return;
     }
 
     if (isNew && record.templaterWillProcess) {
-      // Templater will write template content and place its own cursor.
-      // Defer past its 300ms delay. Only apply if the template has an
-      // explicit cursor-position key — otherwise Templater owns the cursor.
       window.setTimeout(() => {
-        const fresh = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!fresh || fresh.file?.path !== file.path) {
+        const fresh = this.findActiveMarkdownView(file);
+        if (!fresh) {
           return;
         }
-        const override = this.getFrontmatterOverride(fresh);
-        if (override) {
+        // Only apply if the template explicitly declares cursor-position
+        const override = this.getFrontmatterOverride(fresh, true);
+        if (override && override !== 'none') {
           this.setCursorPosition(fresh, override);
         }
       }, TEMPLATER_DEFER_MS);
@@ -99,56 +90,33 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
   }
 
-  // Removes and returns the record if the file was recently created, or null.
   public consumeRecord(file: TFile): FileRecord | null {
-    const record = this.recentlyCreated.get(file.path);
-    if (!record) {
+    const rec = this.recentlyCreated.get(file.path);
+    if (!rec) {
       return null;
     }
     this.recentlyCreated.delete(file.path);
-    if (Date.now() - record.createdAt > NEW_FILE_TTL_MS) {
-      return null;
-    }
-    return record;
+    return Date.now() - rec.createdAt <= NEW_FILE_TTL_MS ? rec : null;
   }
 
   public resolvePosition(view: MarkdownView, isNew: boolean): CursorPositionOrNone {
-    const override = this.getFrontmatterOverride(view);
-    if (override) {
-      return override;
-    }
-    return isNew ? this.settings.onCreate : this.settings.onOpen;
+    return this.getFrontmatterOverride(view, isNew) ??
+      (isNew ? this.settings.onCreate : this.settings.onOpen);
   }
 
-  public getFrontmatterOverride(view: MarkdownView): CursorPosition | null {
-    const editor = view.editor;
-
-    if (editor.lineCount() < 2 || editor.getLine(0).trim() !== '---') {
-      return null;
-    }
-
-    for (let i = 1; i < editor.lineCount(); i++) {
-      const line = editor.getLine(i);
-
-      if (line.trim() === '---') {
-        break;
-      }
-
-      const match = /^cursor-position:\s*["']?([^"'\s]+)["']?/.exec(line);
-      if (match) {
-        const value = match[1] as CursorPosition;
-        if (VALID_POSITIONS.includes(value)) {
-          return value;
-        }
-      }
-    }
-
-    return null;
+  // (#2, #3) Read cursor position from frontmatter.
+  // Checks the event-specific key first (cursor-position-create / cursor-position-open),
+  // then falls back to the generic cursor-position key.
+  // Returns null when no key is present (use global setting).
+  // Returns 'none' when the note explicitly opts out.
+  public getFrontmatterOverride(view: MarkdownView, isNew: boolean): CursorPositionOrNone | null {
+    const specificKey = isNew ? 'cursor-position-create' : 'cursor-position-open';
+    return this.readFrontmatterKey(view, specificKey)
+      ?? this.readFrontmatterKey(view, 'cursor-position');
   }
 
   public getBodyStart(view: MarkdownView): { ch: number; line: number } {
     const editor = view.editor;
-
     if (editor.lineCount() > 1 && editor.getLine(0).trim() === '---') {
       for (let i = 1; i < editor.lineCount(); i++) {
         if (editor.getLine(i).trim() === '---') {
@@ -160,20 +128,24 @@ export class Plugin extends PluginBase<PluginTypes> {
         }
       }
     }
-
     return { ch: 0, line: 0 };
   }
 
   public setCursorPosition(view: MarkdownView, position: CursorPosition): void {
-    if (position === 'title') {
-      view.leaf.setEphemeralState({ rename: 'end' });
-      view.containerEl.querySelector<HTMLElement>('.inline-title')?.focus();
-      return;
-    }
+    if (position === 'title' || position === 'title-highlighted') {
+      const rename = position === 'title-highlighted' ? 'all' : 'end';
+      view.leaf.setEphemeralState({ rename });
 
-    if (position === 'title-highlighted') {
-      view.leaf.setEphemeralState({ rename: 'all' });
-      view.containerEl.querySelector<HTMLElement>('.inline-title')?.focus();
+      // (#4) Inline title fallback: if the user has disabled "Show inline title"
+      // in Obsidian settings, .inline-title won't exist — fall back to body start.
+      const titleEl = view.containerEl.querySelector<HTMLElement>('.inline-title');
+      if (titleEl) {
+        // Focus triggers the on-screen keyboard on mobile (#1 mobile fix)
+        titleEl.focus();
+      } else {
+        view.editor.focus();
+        view.editor.setCursor(this.getBodyStart(view));
+      }
       return;
     }
 
@@ -191,10 +163,6 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
   }
 
-  // Returns true if Templater is installed and will process this file:
-  // - explicit template creation: already in files_with_pending_templates
-  // - folder-trigger: trigger_on_file_creation is on (Templater adds to the
-  //   pending set only after its own 300ms delay, so we must decide here)
   public templaterWillProcess(file: TFile): boolean {
     const plugin = (this.app as any).plugins?.plugins?.['templater-obsidian'];
     if (!plugin) {
@@ -204,5 +172,55 @@ export class Plugin extends PluginBase<PluginTypes> {
       return true;
     }
     return plugin.settings?.trigger_on_file_creation === true;
+  }
+
+  // (#5) Returns true when the file's path falls under an excluded folder.
+  public isExcluded(file: TFile): boolean {
+    return this.settings.excludedFolders.some((folder) => {
+      const normalized = folder.replace(/\/+$/, '');
+      if (!normalized) {
+        return false;
+      }
+      return file.path === normalized || file.path.startsWith(normalized + '/');
+    });
+  }
+
+  // (#6) Find the active MarkdownView for a file across all workspace roots
+  // (main window, popout windows, hover editors).
+  public findActiveMarkdownView(file: TFile): MarkdownView | null {
+    const leaf = (this.app.workspace as any).activeLeaf;
+    if (!leaf) {
+      return null;
+    }
+    const view = leaf.view;
+    if (!(view instanceof MarkdownView)) {
+      return null;
+    }
+    return view.file?.path === file.path ? view : null;
+  }
+
+  // Scans frontmatter lines for a specific key and returns its value if valid.
+  private readFrontmatterKey(view: MarkdownView, key: string): CursorPositionOrNone | null {
+    const editor = view.editor;
+    if (editor.lineCount() < 2 || editor.getLine(0).trim() !== '---') {
+      return null;
+    }
+    // Escape hyphens in key for use in regex
+    const escapedKey = key.replace(/-/g, '\\-');
+    const pattern = new RegExp(`^${escapedKey}:\\s*["']?([^"'\\s]+)["']?`);
+    for (let i = 1; i < editor.lineCount(); i++) {
+      const line = editor.getLine(i);
+      if (line.trim() === '---') {
+        break;
+      }
+      const match = pattern.exec(line);
+      if (match) {
+        const value = match[1] as CursorPositionOrNone;
+        if (VALID_FRONTMATTER_VALUES.includes(value)) {
+          return value;
+        }
+      }
+    }
+    return null;
   }
 }

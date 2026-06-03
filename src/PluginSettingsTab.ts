@@ -17,7 +17,11 @@ export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
 
     new SettingEx(this.containerEl)
       .setName('On note creation')
-      .setDesc('Where the cursor lands when a new note is created. Override per note with cursor-position: <value> in frontmatter.')
+      .setDesc(
+        'Where the cursor lands when a new note is created. ' +
+        'Override per note with cursor-position-create: <value> in frontmatter ' +
+        '(or cursor-position: <value> as a fallback for both events).'
+      )
       .addDropdown((dropdown) => {
         dropdown.addOptions(POSITION_OPTIONS);
         this.bind(dropdown, 'onCreate');
@@ -25,10 +29,25 @@ export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
 
     new SettingEx(this.containerEl)
       .setName('On note open')
-      .setDesc('Where the cursor lands when an existing note is opened. "None" leaves the cursor wherever Obsidian puts it. Override per note with cursor-position: <value> in frontmatter.')
+      .setDesc(
+        'Where the cursor lands when an existing note is opened. ' +
+        '"None" leaves the cursor wherever Obsidian puts it. ' +
+        'Override per note with cursor-position-open: <value> in frontmatter.'
+      )
       .addDropdown((dropdown) => {
-        dropdown.addOptions({ 'none': 'None (don\'t move cursor)', ...POSITION_OPTIONS });
+        dropdown.addOptions({ 'none': "None (don't move cursor)", ...POSITION_OPTIONS });
         this.bind(dropdown, 'onOpen');
+      });
+
+    new SettingEx(this.containerEl)
+      .setName('Excluded folders')
+      .setDesc(
+        'Notes inside these folders will never have their cursor moved. ' +
+        'One folder path per line. Example: Templates'
+      )
+      .addMultipleText((multipleText) => {
+        multipleText.setPlaceholder('Templates');
+        this.bind(multipleText, 'excludedFolders');
       });
   }
 }

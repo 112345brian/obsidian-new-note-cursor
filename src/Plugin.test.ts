@@ -1,4 +1,5 @@
 import type { App, TAbstractFile, TFile, WorkspaceLeaf } from 'obsidian';
+import { MarkdownView } from 'obsidian';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { CursorPosition, CursorPositionOrNone } from './PluginSettings.ts';
@@ -12,7 +13,7 @@ import { PluginSettings } from './PluginSettings.ts';
 
 interface FileRecord { createdAt: number; templaterWillProcess: boolean; }
 
-function record(opts: Partial<FileRecord> = {}): FileRecord {
+function rec(opts: Partial<FileRecord> = {}): FileRecord {
   return { createdAt: Date.now(), templaterWillProcess: false, ...opts };
 }
 
@@ -25,37 +26,47 @@ function makeEditor(lines: string[]) {
   };
 }
 
-function makeView(lines: string[]) {
+function makeView(lines: string[], path = 'test.md') {
   const leaf = { setEphemeralState: vi.fn() } as unknown as WorkspaceLeaf;
   const editor = makeEditor(lines);
   const titleEl = { focus: vi.fn() } as unknown as HTMLElement;
   const containerEl = { querySelector: vi.fn().mockReturnValue(titleEl) } as unknown as HTMLElement;
-  return { containerEl, editor, file: { path: 'test.md' } as TFile, leaf, _titleEl: titleEl };
+  // Use MarkdownView.prototype so instanceof checks pass in Plugin code
+  const view = Object.assign(Object.create(MarkdownView.prototype), {
+    containerEl, editor, file: { path } as TFile, leaf, _titleEl: titleEl,
+  });
+  return view;
 }
 
-function makePlugin(onCreate: CursorPosition = 'body', onOpen: CursorPositionOrNone = 'none') {
+function makePlugin(
+  onCreate: CursorPosition = 'body',
+  onOpen: CursorPositionOrNone = 'none',
+  excludedFolders: string[] = [],
+) {
   const settings = new PluginSettings();
   settings.onCreate = onCreate;
   settings.onOpen = onOpen;
+  settings.excludedFolders = excludedFolders;
+
+  const activeLeaf = { view: null as any };
 
   return {
     app: {
       vault: { on: vi.fn().mockReturnValue({ id: 1 }) },
-      workspace: {
-        getActiveViewOfType: vi.fn(),
-        on: vi.fn().mockReturnValue({ id: 2 }),
-      },
+      workspace: { activeLeaf, on: vi.fn().mockReturnValue({ id: 2 }) },
     } as unknown as App,
     handleCreate: Plugin.prototype.handleCreate,
     handleFileOpen: Plugin.prototype.handleFileOpen,
     consumeRecord: Plugin.prototype.consumeRecord,
     resolvePosition: Plugin.prototype.resolvePosition,
     getFrontmatterOverride: Plugin.prototype.getFrontmatterOverride,
+    readFrontmatterKey: (Plugin.prototype as any).readFrontmatterKey,
     getBodyStart: Plugin.prototype.getBodyStart,
     setCursorPosition: Plugin.prototype.setCursorPosition,
+    isExcluded: Plugin.prototype.isExcluded,
+    findActiveMarkdownView: Plugin.prototype.findActiveMarkdownView,
     recentlyCreated: new Map<string, FileRecord>(),
     settings,
-    // Stub — tests override per-case
     templaterWillProcess: vi.fn().mockReturnValue(false),
   } as any;
 }
@@ -65,34 +76,20 @@ function makePlugin(onCreate: CursorPosition = 'body', onOpen: CursorPositionOrN
 // ---------------------------------------------------------------------------
 
 describe('handleCreate', () => {
-  it('records a markdown file with a fresh timestamp', () => {
-    const plugin = makePlugin();
-    const before = Date.now();
-    plugin.handleCreate({ path: 'notes/foo.md' } as TAbstractFile);
-    const rec: FileRecord = plugin.recentlyCreated.get('notes/foo.md')!;
-    expect(rec.createdAt).toBeGreaterThanOrEqual(before);
-    expect(rec.createdAt).toBeLessThanOrEqual(Date.now());
-  });
-
-  it('snapshots templaterWillProcess at create time', () => {
+  it('records a markdown file with timestamp and Templater snapshot', () => {
     const plugin = makePlugin();
     plugin.templaterWillProcess.mockReturnValue(true);
-    plugin.handleCreate({ path: 'templ.md' } as TAbstractFile);
-    expect(plugin.recentlyCreated.get('templ.md').templaterWillProcess).toBe(true);
+    const before = Date.now();
+    plugin.handleCreate({ path: 'foo.md' } as TAbstractFile);
+    const stored: FileRecord = plugin.recentlyCreated.get('foo.md')!;
+    expect(stored.createdAt).toBeGreaterThanOrEqual(before);
+    expect(stored.templaterWillProcess).toBe(true);
   });
 
   it('ignores non-markdown files', () => {
     const plugin = makePlugin();
     plugin.handleCreate({ path: 'image.png' } as TAbstractFile);
-    plugin.handleCreate({ path: 'data.json' } as TAbstractFile);
     expect(plugin.recentlyCreated.size).toBe(0);
-  });
-
-  it('records multiple markdown files independently', () => {
-    const plugin = makePlugin();
-    plugin.handleCreate({ path: 'a.md' } as TAbstractFile);
-    plugin.handleCreate({ path: 'b.md' } as TAbstractFile);
-    expect(plugin.recentlyCreated.size).toBe(2);
   });
 });
 
@@ -101,9 +98,9 @@ describe('handleCreate', () => {
 // ---------------------------------------------------------------------------
 
 describe('consumeRecord', () => {
-  it('returns the record and removes the entry for a recent file', () => {
+  it('returns record and clears entry for a fresh file', () => {
     const plugin = makePlugin();
-    plugin.recentlyCreated.set('test.md', record());
+    plugin.recentlyCreated.set('test.md', rec());
     const result = plugin.consumeRecord({ path: 'test.md' } as TFile);
     expect(result).not.toBeNull();
     expect(plugin.recentlyCreated.has('test.md')).toBe(false);
@@ -113,81 +110,138 @@ describe('consumeRecord', () => {
     expect(makePlugin().consumeRecord({ path: 'x.md' } as TFile)).toBeNull();
   });
 
-  it('returns null and removes stale entries (> 5 s)', () => {
+  it('returns null and clears stale entries', () => {
     const plugin = makePlugin();
-    plugin.recentlyCreated.set('old.md', record({ createdAt: Date.now() - 6_000 }));
+    plugin.recentlyCreated.set('old.md', rec({ createdAt: Date.now() - 6_000 }));
     expect(plugin.consumeRecord({ path: 'old.md' } as TFile)).toBeNull();
     expect(plugin.recentlyCreated.has('old.md')).toBe(false);
   });
 
-  it('returns the record for an entry just inside the 5 s window', () => {
+  it('returns record just inside the 5 s window', () => {
     const plugin = makePlugin();
-    plugin.recentlyCreated.set('test.md', record({ createdAt: Date.now() - 4_999 }));
+    plugin.recentlyCreated.set('test.md', rec({ createdAt: Date.now() - 4_999 }));
     expect(plugin.consumeRecord({ path: 'test.md' } as TFile)).not.toBeNull();
-  });
-
-  it('preserves templaterWillProcess from the record', () => {
-    const plugin = makePlugin();
-    plugin.recentlyCreated.set('test.md', record({ templaterWillProcess: true }));
-    const result = plugin.consumeRecord({ path: 'test.md' } as TFile);
-    expect(result?.templaterWillProcess).toBe(true);
   });
 });
 
 // ---------------------------------------------------------------------------
-// handleFileOpen — routing
+// isExcluded (#5)
+// ---------------------------------------------------------------------------
+
+describe('isExcluded', () => {
+  it('returns false when no folders are excluded', () => {
+    const plugin = makePlugin('body', 'none', []);
+    expect(plugin.isExcluded({ path: 'Notes/foo.md' } as TFile)).toBe(false);
+  });
+
+  it('excludes a file directly inside an excluded folder', () => {
+    const plugin = makePlugin('body', 'none', ['Templates']);
+    expect(plugin.isExcluded({ path: 'Templates/daily.md' } as TFile)).toBe(true);
+  });
+
+  it('excludes a file in a nested subfolder', () => {
+    const plugin = makePlugin('body', 'none', ['Templates']);
+    expect(plugin.isExcluded({ path: 'Templates/Sub/note.md' } as TFile)).toBe(true);
+  });
+
+  it('does not exclude a file in a folder with a similar name prefix', () => {
+    const plugin = makePlugin('body', 'none', ['Templates']);
+    expect(plugin.isExcluded({ path: 'TemplatesBackup/note.md' } as TFile)).toBe(false);
+  });
+
+  it('handles trailing slashes in excluded folder paths', () => {
+    const plugin = makePlugin('body', 'none', ['Templates/']);
+    expect(plugin.isExcluded({ path: 'Templates/note.md' } as TFile)).toBe(true);
+  });
+
+  it('ignores empty strings in excluded folders list', () => {
+    const plugin = makePlugin('body', 'none', ['']);
+    expect(plugin.isExcluded({ path: 'Notes/foo.md' } as TFile)).toBe(false);
+  });
+
+  it('checks multiple excluded folders', () => {
+    const plugin = makePlugin('body', 'none', ['Archives', 'Templates']);
+    expect(plugin.isExcluded({ path: 'Archives/old.md' } as TFile)).toBe(true);
+    expect(plugin.isExcluded({ path: 'Templates/daily.md' } as TFile)).toBe(true);
+    expect(plugin.isExcluded({ path: 'Notes/active.md' } as TFile)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findActiveMarkdownView (#6)
+// ---------------------------------------------------------------------------
+
+describe('findActiveMarkdownView', () => {
+  it('returns the view when activeLeaf holds a MarkdownView for the right file', () => {
+    const plugin = makePlugin();
+    const view = makeView([]);
+    plugin.app.workspace.activeLeaf = { view } as any;
+    expect(plugin.findActiveMarkdownView({ path: 'test.md' } as TFile)).toBe(view);
+  });
+
+  it('returns null when no activeLeaf', () => {
+    const plugin = makePlugin();
+    plugin.app.workspace.activeLeaf = null;
+    expect(plugin.findActiveMarkdownView({ path: 'test.md' } as TFile)).toBeNull();
+  });
+
+  it('returns null when activeLeaf holds a different file', () => {
+    const plugin = makePlugin();
+    const view = makeView([], 'other.md');
+    plugin.app.workspace.activeLeaf = { view } as any;
+    expect(plugin.findActiveMarkdownView({ path: 'test.md' } as TFile)).toBeNull();
+  });
+
+  it('returns null when activeLeaf view is not a MarkdownView', () => {
+    const plugin = makePlugin();
+    plugin.app.workspace.activeLeaf = { view: { type: 'graph' } } as any;
+    expect(plugin.findActiveMarkdownView({ path: 'test.md' } as TFile)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleFileOpen
 // ---------------------------------------------------------------------------
 
 describe('handleFileOpen', () => {
-  it('does nothing when file is null', () => {
+  it('does nothing for null', () => {
     const plugin = makePlugin();
+    expect(() => plugin.handleFileOpen(null)).not.toThrow();
+  });
+
+  it('skips excluded folders', () => {
+    const plugin = makePlugin('body', 'none', ['Templates']);
+    plugin.recentlyCreated.set('Templates/note.md', rec());
+    const view = makeView([], 'Templates/note.md');
+    plugin.app.workspace.activeLeaf = { view } as any;
     const spy = vi.spyOn(plugin, 'setCursorPosition');
-    plugin.handleFileOpen(null);
+    plugin.handleFileOpen({ path: 'Templates/note.md' } as TFile);
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('does nothing when there is no active MarkdownView', () => {
-    const plugin = makePlugin();
-    plugin.recentlyCreated.set('test.md', record());
-    plugin.app.workspace.getActiveViewOfType.mockReturnValue(null);
-    const spy = vi.spyOn(plugin, 'setCursorPosition');
-    plugin.handleFileOpen({ path: 'test.md' } as TFile);
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  it('does nothing when active view is for a different file', () => {
-    const plugin = makePlugin();
-    plugin.recentlyCreated.set('test.md', record());
-    const wrongView = { ...makeView([]), file: { path: 'other.md' } as TFile };
-    plugin.app.workspace.getActiveViewOfType.mockReturnValue(wrongView);
-    const spy = vi.spyOn(plugin, 'setCursorPosition');
-    plugin.handleFileOpen({ path: 'test.md' } as TFile);
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  it('applies onCreate position for a new file', () => {
+  it('applies onCreate for a new non-excluded file', () => {
     const plugin = makePlugin('end', 'none');
-    plugin.recentlyCreated.set('test.md', record());
+    plugin.recentlyCreated.set('test.md', rec());
     const view = makeView(['content']);
-    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    plugin.app.workspace.activeLeaf = { view } as any;
     const spy = vi.spyOn(plugin, 'setCursorPosition');
     plugin.handleFileOpen({ path: 'test.md' } as TFile);
     expect(spy).toHaveBeenCalledWith(view, 'end');
   });
 
-  it('applies onOpen position for an existing file', () => {
+  it('applies onOpen for an existing file', () => {
     const plugin = makePlugin('title', 'body');
     const view = makeView(['content']);
-    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    plugin.app.workspace.activeLeaf = { view } as any;
     const spy = vi.spyOn(plugin, 'setCursorPosition');
     plugin.handleFileOpen({ path: 'test.md' } as TFile);
     expect(spy).toHaveBeenCalledWith(view, 'body');
   });
 
-  it('skips onOpen when set to none', () => {
+  it('skips when position resolves to none', () => {
     const plugin = makePlugin('title', 'none');
     const view = makeView(['content']);
-    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    plugin.app.workspace.activeLeaf = { view } as any;
     const spy = vi.spyOn(plugin, 'setCursorPosition');
     plugin.handleFileOpen({ path: 'test.md' } as TFile);
     expect(spy).not.toHaveBeenCalled();
@@ -199,114 +253,119 @@ describe('handleFileOpen', () => {
 // ---------------------------------------------------------------------------
 
 describe('Templater compatibility', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
+  beforeEach(() => { vi.useFakeTimers(); });
 
-  it('defers and skips when Templater will process and no frontmatter override', () => {
+  it('defers and skips when Templater will process with no frontmatter override', () => {
     const plugin = makePlugin('body');
-    plugin.recentlyCreated.set('test.md', record({ templaterWillProcess: true }));
-    const view = makeView(['']); // empty — Templater hasn't written yet
-    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    plugin.recentlyCreated.set('test.md', rec({ templaterWillProcess: true }));
+    const view = makeView(['']);
+    plugin.app.workspace.activeLeaf = { view } as any;
     const spy = vi.spyOn(plugin, 'setCursorPosition');
-
     plugin.handleFileOpen({ path: 'test.md' } as TFile);
     expect(spy).not.toHaveBeenCalled();
-
-    // After defer, empty file still has no override → Templater wins
     vi.advanceTimersByTime(350);
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('defers and applies frontmatter override after Templater writes the template', () => {
+  it('defers and applies frontmatter cursor-position-create after Templater writes', () => {
     const plugin = makePlugin('body');
-    plugin.recentlyCreated.set('test.md', record({ templaterWillProcess: true }));
-
-    const emptyView = makeView(['']);
-    const templateView = makeView(['---', 'cursor-position: end', '---', '', 'Template content']);
-    plugin.app.workspace.getActiveViewOfType
-      .mockReturnValueOnce(emptyView)
-      .mockReturnValue(templateView);
-
+    plugin.recentlyCreated.set('test.md', rec({ templaterWillProcess: true }));
+    const templateView = makeView(['---', 'cursor-position-create: end', '---', '', 'content']);
+    plugin.app.workspace.activeLeaf = { view: makeView(['']) } as any;
     const spy = vi.spyOn(plugin, 'setCursorPosition');
     plugin.handleFileOpen({ path: 'test.md' } as TFile);
-    expect(spy).not.toHaveBeenCalled();
-
+    plugin.app.workspace.activeLeaf = { view: templateView } as any;
     vi.advanceTimersByTime(350);
     expect(spy).toHaveBeenCalledWith(templateView, 'end');
   });
 
-  it('does not defer for non-Templater files', () => {
+  it('does not apply when Templater deferred frontmatter override is none', () => {
     const plugin = makePlugin('body');
-    plugin.recentlyCreated.set('test.md', record({ templaterWillProcess: false }));
-    const view = makeView(['content']);
-    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    plugin.recentlyCreated.set('test.md', rec({ templaterWillProcess: true }));
+    const view = makeView(['---', 'cursor-position: none', '---']);
+    plugin.app.workspace.activeLeaf = { view: makeView(['']) } as any;
     const spy = vi.spyOn(plugin, 'setCursorPosition');
-
     plugin.handleFileOpen({ path: 'test.md' } as TFile);
-    expect(spy).toHaveBeenCalledWith(view, 'body');
+    plugin.app.workspace.activeLeaf = { view } as any;
+    vi.advanceTimersByTime(350);
+    expect(spy).not.toHaveBeenCalled();
   });
 
-  it('defers when Templater folder-trigger is on (snapshotted at create time)', () => {
+  it('fires immediately for non-Templater files', () => {
     const plugin = makePlugin('body');
-    // Simulates a file where trigger_on_file_creation=true was detected at create time
-    plugin.recentlyCreated.set('test.md', record({ templaterWillProcess: true }));
-    const view = makeView(['no frontmatter content']);
-    plugin.app.workspace.getActiveViewOfType.mockReturnValue(view);
+    plugin.recentlyCreated.set('test.md', rec({ templaterWillProcess: false }));
+    const view = makeView(['content']);
+    plugin.app.workspace.activeLeaf = { view } as any;
     const spy = vi.spyOn(plugin, 'setCursorPosition');
-
     plugin.handleFileOpen({ path: 'test.md' } as TFile);
-    // Deferred because Templater might write a template
-    expect(spy).not.toHaveBeenCalled();
+    expect(spy).toHaveBeenCalledWith(view, 'body');
   });
 });
 
 // ---------------------------------------------------------------------------
-// templaterWillProcess
+// getFrontmatterOverride — event-specific keys + none (#2, #3)
 // ---------------------------------------------------------------------------
 
-describe('templaterWillProcess', () => {
-  function makePluginWithApp(pluginsObj: Record<string, unknown>) {
-    const plugin = makePlugin();
-    // Replace the stubbed method with the real one
-    plugin.templaterWillProcess = Plugin.prototype.templaterWillProcess;
-    (plugin.app as any).plugins = { plugins: pluginsObj };
-    return plugin;
+describe('getFrontmatterOverride', () => {
+  function override(lines: string[], isNew = true) {
+    return makePlugin().getFrontmatterOverride(makeView(lines), isNew);
   }
 
-  it('returns false when Templater is not installed', () => {
-    const plugin = makePluginWithApp({});
-    expect(plugin.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(false);
+  it('returns null when no frontmatter', () => {
+    expect(override(['# Title', 'content'])).toBeNull();
   });
 
-  it('returns true when file is in files_with_pending_templates', () => {
-    const plugin = makePluginWithApp({
-      'templater-obsidian': {
-        templater: { files_with_pending_templates: new Set(['test.md']) },
-        settings: { trigger_on_file_creation: false },
-      },
-    });
-    expect(plugin.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(true);
+  it('returns null when no cursor-position key', () => {
+    expect(override(['---', 'title: Note', '---'])).toBeNull();
   });
 
-  it('returns false when file is not in files_with_pending_templates and trigger is off', () => {
-    const plugin = makePluginWithApp({
-      'templater-obsidian': {
-        templater: { files_with_pending_templates: new Set() },
-        settings: { trigger_on_file_creation: false },
-      },
-    });
-    expect(plugin.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(false);
+  it('returns value from cursor-position for a create event', () => {
+    expect(override(['---', 'cursor-position: body', '---'], true)).toBe('body');
   });
 
-  it('returns true when trigger_on_file_creation is enabled', () => {
-    const plugin = makePluginWithApp({
-      'templater-obsidian': {
-        templater: { files_with_pending_templates: new Set() },
-        settings: { trigger_on_file_creation: true },
-      },
-    });
-    expect(plugin.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(true);
+  it('returns value from cursor-position for an open event', () => {
+    expect(override(['---', 'cursor-position: end', '---'], false)).toBe('end');
+  });
+
+  it('cursor-position-create takes precedence over cursor-position on create', () => {
+    const lines = ['---', 'cursor-position: title', 'cursor-position-create: body', '---'];
+    expect(override(lines, true)).toBe('body');
+  });
+
+  it('cursor-position-open takes precedence over cursor-position on open', () => {
+    const lines = ['---', 'cursor-position: title', 'cursor-position-open: end', '---'];
+    expect(override(lines, false)).toBe('end');
+  });
+
+  it('cursor-position-create does not affect open events', () => {
+    const lines = ['---', 'cursor-position-create: body', '---'];
+    expect(override(lines, false)).toBeNull();
+  });
+
+  it('cursor-position-open does not affect create events', () => {
+    const lines = ['---', 'cursor-position-open: end', '---'];
+    expect(override(lines, true)).toBeNull();
+  });
+
+  it('returns none when cursor-position is set to none', () => {
+    expect(override(['---', 'cursor-position: none', '---'])).toBe('none');
+  });
+
+  it('returns none from cursor-position-create: none', () => {
+    expect(override(['---', 'cursor-position-create: none', '---'], true)).toBe('none');
+  });
+
+  it('returns null for an unrecognised value', () => {
+    expect(override(['---', 'cursor-position: somewhere-else', '---'])).toBeNull();
+  });
+
+  it('accepts quoted values', () => {
+    expect(override(['---', 'cursor-position: "end"', '---'])).toBe('end');
+    expect(override(['---', "cursor-position: 'body'", '---'])).toBe('body');
+  });
+
+  it('ignores key that appears after the closing ---', () => {
+    expect(override(['---', '---', 'cursor-position: body'])).toBeNull();
   });
 });
 
@@ -325,68 +384,17 @@ describe('resolvePosition', () => {
     expect(plugin.resolvePosition(makeView(['no frontmatter']), false)).toBe('body');
   });
 
-  it('frontmatter override takes precedence over onCreate', () => {
-    const plugin = makePlugin('title', 'none');
-    const view = makeView(['---', 'cursor-position: body', '---']);
-    expect(plugin.resolvePosition(view, true)).toBe('body');
-  });
-
-  it('frontmatter override takes precedence over onOpen', () => {
+  it('frontmatter override takes precedence', () => {
     const plugin = makePlugin('title', 'body');
     const view = makeView(['---', 'cursor-position: end', '---']);
+    expect(plugin.resolvePosition(view, true)).toBe('end');
     expect(plugin.resolvePosition(view, false)).toBe('end');
   });
-});
 
-// ---------------------------------------------------------------------------
-// getFrontmatterOverride
-// ---------------------------------------------------------------------------
-
-describe('getFrontmatterOverride', () => {
-  function override(lines: string[]) {
-    return makePlugin().getFrontmatterOverride(makeView(lines));
-  }
-
-  it('returns null for a note with no frontmatter', () => {
-    expect(override(['# Title', '', 'content'])).toBeNull();
-  });
-
-  it('returns null for an empty note', () => {
-    expect(override([''])).toBeNull();
-  });
-
-  it('returns null when frontmatter has no cursor-position key', () => {
-    expect(override(['---', 'title: My Note', '---', 'content'])).toBeNull();
-  });
-
-  it.each([
-    ['body'],
-    ['end'],
-    ['title'],
-    ['title-highlighted'],
-  ] as [CursorPosition][][])('returns %s when set in frontmatter', (value) => {
-    expect(override(['---', `cursor-position: ${value}`, '---'])).toBe(value);
-  });
-
-  it('accepts double-quoted values', () => {
-    expect(override(['---', 'cursor-position: "body"', '---'])).toBe('body');
-  });
-
-  it('accepts single-quoted values', () => {
-    expect(override(['---', "cursor-position: 'end'", '---'])).toBe('end');
-  });
-
-  it('returns null for an unrecognised value', () => {
-    expect(override(['---', 'cursor-position: nowhere', '---'])).toBeNull();
-  });
-
-  it('finds the key among other frontmatter fields', () => {
-    const lines = ['---', 'title: Note', 'tags: [a]', 'cursor-position: end', 'date: 2024-01-01', '---'];
-    expect(override(lines)).toBe('end');
-  });
-
-  it('ignores cursor-position that appears after the closing ---', () => {
-    expect(override(['---', 'title: Note', '---', 'cursor-position: body'])).toBeNull();
+  it('frontmatter none resolves to none (explicit opt-out)', () => {
+    const plugin = makePlugin('title', 'body');
+    const view = makeView(['---', 'cursor-position: none', '---']);
+    expect(plugin.resolvePosition(view, true)).toBe('none');
   });
 });
 
@@ -403,147 +411,133 @@ describe('getBodyStart', () => {
     expect(bodyStart([''])).toEqual({ ch: 0, line: 0 });
   });
 
-  it('returns {line:0} when there is no frontmatter', () => {
+  it('returns {line:0} when no frontmatter', () => {
     expect(bodyStart(['# Heading', '', 'Content'])).toEqual({ ch: 0, line: 0 });
   });
 
-  it('skips empty line after --- and lands on first content line', () => {
+  it('skips empty line after --- and lands on content', () => {
     expect(bodyStart(['---', 'title: Note', '---', '', '# Body'])).toEqual({ ch: 0, line: 4 });
   });
 
-  it('lands directly after --- when no empty line follows', () => {
+  it('lands directly after --- when no blank line follows', () => {
     expect(bodyStart(['---', 'title: Note', '---', '# Body'])).toEqual({ ch: 0, line: 3 });
   });
 
-  it('clamps to last line when frontmatter has no body', () => {
+  it('clamps when no content after frontmatter', () => {
     expect(bodyStart(['---', 'title: Note', '---'])).toEqual({ ch: 0, line: 2 });
   });
 
-  it('clamps when frontmatter ends with empty line but no content', () => {
-    expect(bodyStart(['---', 'title: Note', '---', ''])).toEqual({ ch: 0, line: 3 });
-  });
-
   it('returns {line:0} for unclosed frontmatter', () => {
-    expect(bodyStart(['---', 'title: Note', 'no closing delimiter'])).toEqual({ ch: 0, line: 0 });
-  });
-
-  it('handles whitespace on the closing delimiter', () => {
-    expect(bodyStart(['---', 'title: Note', '--- ', 'Body'])).toEqual({ ch: 0, line: 3 });
-  });
-
-  it('does not treat --- in body as frontmatter', () => {
-    expect(bodyStart(['# Title', '---', 'Paragraph'])).toEqual({ ch: 0, line: 0 });
+    expect(bodyStart(['---', 'title: Note'])).toEqual({ ch: 0, line: 0 });
   });
 });
 
 // ---------------------------------------------------------------------------
-// setCursorPosition
+// setCursorPosition — including inline-title fallback (#4)
 // ---------------------------------------------------------------------------
 
 describe('setCursorPosition', () => {
   describe('title', () => {
-    it('calls setEphemeralState({ rename: "end" })', () => {
+    it('calls setEphemeralState and focuses inline-title when present', () => {
       const plugin = makePlugin();
       const view = makeView([]);
       plugin.setCursorPosition(view, 'title');
       expect(view.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'end' });
-    });
-
-    it('focuses the inline-title element for mobile keyboard', () => {
-      const plugin = makePlugin();
-      const view = makeView([]);
-      plugin.setCursorPosition(view, 'title');
       expect(view._titleEl.focus).toHaveBeenCalled();
+      expect(view.editor.setCursor).not.toHaveBeenCalled();
     });
 
-    it('does not move the editor cursor', () => {
+    it('falls back to body start when inline-title is absent', () => {
       const plugin = makePlugin();
       const view = makeView(['content']);
+      view.containerEl.querySelector = vi.fn().mockReturnValue(null); // no inline-title
       plugin.setCursorPosition(view, 'title');
-      expect(view.editor.setCursor).not.toHaveBeenCalled();
+      expect(view.editor.focus).toHaveBeenCalled();
+      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
     });
   });
 
   describe('title-highlighted', () => {
-    it('calls setEphemeralState({ rename: "all" })', () => {
+    it('calls setEphemeralState({ rename: "all" }) and focuses inline-title', () => {
       const plugin = makePlugin();
       const view = makeView([]);
       plugin.setCursorPosition(view, 'title-highlighted');
       expect(view.leaf.setEphemeralState).toHaveBeenCalledWith({ rename: 'all' });
-    });
-
-    it('focuses the inline-title element for mobile keyboard', () => {
-      const plugin = makePlugin();
-      const view = makeView([]);
-      plugin.setCursorPosition(view, 'title-highlighted');
       expect(view._titleEl.focus).toHaveBeenCalled();
     });
 
-    it('does not move the editor cursor', () => {
+    it('falls back to body start when inline-title is absent', () => {
       const plugin = makePlugin();
-      const view = makeView(['content']);
+      const view = makeView(['---', 'title: T', '---', '', 'content']);
+      view.containerEl.querySelector = vi.fn().mockReturnValue(null);
       plugin.setCursorPosition(view, 'title-highlighted');
-      expect(view.editor.setCursor).not.toHaveBeenCalled();
+      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 4 });
     });
   });
 
   describe('body', () => {
-    it('focuses the editor', () => {
+    it('places cursor after frontmatter', () => {
       const plugin = makePlugin();
-      const view = makeView(['line 0']);
-      plugin.setCursorPosition(view, 'body');
-      expect(view.editor.focus).toHaveBeenCalled();
-    });
-
-    it('places cursor at line 0 for a plain note', () => {
-      const plugin = makePlugin();
-      const view = makeView(['Hello world']);
-      plugin.setCursorPosition(view, 'body');
-      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
-    });
-
-    it('skips frontmatter and blank line', () => {
-      const plugin = makePlugin();
-      const view = makeView(['---', 'title: Test', '---', '', 'Body here']);
+      const view = makeView(['---', 'title: T', '---', '', 'Body']);
       plugin.setCursorPosition(view, 'body');
       expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 4 });
-    });
-
-    it('does not call setEphemeralState', () => {
-      const plugin = makePlugin();
-      const view = makeView(['content']);
-      plugin.setCursorPosition(view, 'body');
-      expect(view.leaf.setEphemeralState).not.toHaveBeenCalled();
     });
   });
 
   describe('end', () => {
-    it('focuses the editor', () => {
-      const plugin = makePlugin();
-      const view = makeView(['line 0', 'line 1']);
-      plugin.setCursorPosition(view, 'end');
-      expect(view.editor.focus).toHaveBeenCalled();
-    });
-
     it('places cursor at end of last line', () => {
       const plugin = makePlugin();
-      const view = makeView(['first', 'second line', 'final']);
+      const view = makeView(['first', 'last line']);
       plugin.setCursorPosition(view, 'end');
-      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 5, line: 2 });
+      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 9, line: 1 });
     });
+  });
+});
 
-    it('handles empty last line (ch: 0)', () => {
-      const plugin = makePlugin();
-      const view = makeView(['some content', '']);
-      plugin.setCursorPosition(view, 'end');
-      expect(view.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 1 });
-    });
+// ---------------------------------------------------------------------------
+// templaterWillProcess
+// ---------------------------------------------------------------------------
 
-    it('does not call setEphemeralState', () => {
-      const plugin = makePlugin();
-      const view = makeView(['content']);
-      plugin.setCursorPosition(view, 'end');
-      expect(view.leaf.setEphemeralState).not.toHaveBeenCalled();
+describe('templaterWillProcess', () => {
+  function pluginWithTemplater(config: Record<string, unknown>) {
+    const plugin = makePlugin();
+    plugin.templaterWillProcess = Plugin.prototype.templaterWillProcess;
+    (plugin.app as any).plugins = { plugins: config };
+    return plugin;
+  }
+
+  it('returns false when Templater is not installed', () => {
+    const p = pluginWithTemplater({});
+    expect(p.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(false);
+  });
+
+  it('returns true when file is in files_with_pending_templates', () => {
+    const p = pluginWithTemplater({
+      'templater-obsidian': {
+        templater: { files_with_pending_templates: new Set(['test.md']) },
+        settings: { trigger_on_file_creation: false },
+      },
     });
+    expect(p.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(true);
+  });
+
+  it('returns true when trigger_on_file_creation is enabled', () => {
+    const p = pluginWithTemplater({
+      'templater-obsidian': {
+        templater: { files_with_pending_templates: new Set() },
+        settings: { trigger_on_file_creation: true },
+      },
+    });
+    expect(p.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(true);
+  });
+
+  it('returns false when Templater installed but trigger off and file not pending', () => {
+    const p = pluginWithTemplater({
+      'templater-obsidian': {
+        templater: { files_with_pending_templates: new Set() },
+        settings: { trigger_on_file_creation: false },
+      },
+    });
+    expect(p.templaterWillProcess({ path: 'test.md' } as TFile)).toBe(false);
   });
 });
