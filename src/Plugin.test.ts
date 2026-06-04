@@ -184,6 +184,14 @@ describe('watchAndRedirect', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it('applies cursor immediately for non-title modes', () => {
+    const plugin = makePlugin();
+    const editor = makeEditorInfo(['content']);
+    setActiveEditor(plugin, editor);
+    plugin.watchAndRedirect(makeFile(), 'body');
+    expect(editor.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
+  });
+
   it('delegates to retryCursor for non-title modes', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo(['content']);
@@ -197,54 +205,53 @@ describe('watchAndRedirect', () => {
 describe('retryCursor', () => {
   beforeEach(() => { vi.useFakeTimers(); });
 
-  it('applies cursor immediately', () => {
+  it('watches for the full window regardless of focus state', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo(['content']);
     setActiveEditor(plugin, editor);
-    plugin.retryCursor(makeFile(), 'body', 3);
-    expect(editor.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
-  });
-
-  it('does not retry when editor has focus (title does not)', () => {
-    const plugin = makePlugin();
-    const editor = makeEditorInfo(['content']);
-    setActiveEditor(plugin, editor);
-    // document.activeElement is NOT the title → correct for body mode
     const spy = vi.spyOn(plugin, 'retryCursor');
     plugin.retryCursor(makeFile(), 'body', 3);
-    vi.advanceTimersByTime(100);
-    // Only the initial call — no retry
-    expect(spy).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(300);
+    // initial call + 3 recursive calls (one per tick)
+    expect(spy).toHaveBeenCalledTimes(4);
   });
 
-  it('retries when title has focus for body mode', () => {
+  it('reapplies cursor when title has focus for body mode', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo(['content']);
     setActiveEditor(plugin, editor);
 
-    // Make the title appear focused by overriding querySelector in the view
+    // Make the title appear focused
     plugin.app.workspace.getActiveViewOfType.mockReturnValue({
       ...editor,
-      containerEl: {
-        querySelector: () => document.activeElement, // activeElement === the "title"
-      },
+      containerEl: { querySelector: () => document.activeElement },
     });
 
-    const spy = vi.spyOn(plugin, 'retryCursor');
-    plugin.retryCursor(makeFile(), 'body', 2);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.retryCursor(makeFile(), 'body', 1);
     vi.advanceTimersByTime(100);
-    expect(spy).toHaveBeenCalledTimes(2); // initial + 1 retry
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it('does not reapply when editor already has focus for body mode', () => {
+    const plugin = makePlugin();
+    const editor = makeEditorInfo(['content']);
+    setActiveEditor(plugin, editor);
+    // document.activeElement is document.body (not the title) → correct state
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.retryCursor(makeFile(), 'body', 1);
+    vi.advanceTimersByTime(100);
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('stops when retriesLeft reaches 0', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo(['content']);
     setActiveEditor(plugin, editor);
-    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    const spy = vi.spyOn(plugin, 'retryCursor');
     plugin.retryCursor(makeFile(), 'body', 0);
     vi.runAllTimers();
-    // setCursorPosition called once (the initial apply), no further retries
-    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledTimes(1); // only the initial call, no recursion
   });
 
   it('does nothing when file is no longer active', () => {
@@ -252,6 +259,7 @@ describe('retryCursor', () => {
     setActiveEditor(plugin, makeEditorInfo([], 'other.md'));
     const spy = vi.spyOn(plugin, 'setCursorPosition');
     plugin.retryCursor(makeFile('test.md'), 'body', 3);
+    vi.advanceTimersByTime(300);
     expect(spy).not.toHaveBeenCalled();
   });
 });

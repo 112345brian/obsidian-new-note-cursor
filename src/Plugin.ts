@@ -191,13 +191,6 @@ export class Plugin extends PluginBase<PluginTypes> {
   }
 
   public retryCursor(file: TFile, position: CursorPosition, retriesLeft: number): void {
-    const editor = this.app.workspace.activeEditor;
-    if (!editor?.editor || editor.file?.path !== file.path) {
-      return;
-    }
-
-    this.setCursorPosition(editor, position);
-
     if (retriesLeft <= 0) {
       return;
     }
@@ -216,8 +209,12 @@ export class Plugin extends PluginBase<PluginTypes> {
       // For title-highlighted we want the title focused.
       const wrong = position === 'title-highlighted' ? !titleHasFocus : titleHasFocus;
       if (wrong) {
-        this.retryCursor(file, position, retriesLeft - 1);
+        this.setCursorPosition(fresh, position);
       }
+
+      // Always keep watching for the full window — Obsidian can steal focus multiple
+      // Times during init, and stopping early when it looks correct loses to a later steal.
+      this.retryCursor(file, position, retriesLeft - 1);
     }, RETRY_DELAY_MS);
   }
 
@@ -277,14 +274,21 @@ export class Plugin extends PluginBase<PluginTypes> {
       || (plugin.settings?.trigger_on_file_creation ?? false);
   }
 
-  // Apply, verify, retry — same strategy as obsidian-last-position.
-  // Set the cursor, check 100 ms later whether Obsidian moved it back to the
-  // Inline title, and reapply if so. Repeats up to MAX_RETRIES times.
+  // Apply immediately, then watch for the full init window and reapply whenever
+  // Obsidian steals focus back to the inline title.
   public watchAndRedirect(file: TFile, position: CursorPosition): void {
     if (position === 'title') {
       // Obsidian's default for new notes is already cursor-at-title-end.
       return;
     }
+
+    const editor = this.app.workspace.activeEditor;
+    if (!editor?.editor || editor.file?.path !== file.path) {
+      return;
+    }
+
+    this.setCursorPosition(editor, position);
+
     const maxRetries = Platform.isMobileApp ? MAX_RETRIES_MOBILE : MAX_RETRIES_DESKTOP;
     this.retryCursor(file, position, maxRetries);
   }
