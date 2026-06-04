@@ -22,26 +22,29 @@ export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
     super.display();
     this.containerEl.empty();
 
+    // Split into two statements so separatorSetting is fully assigned before addText's
+    // Callback runs and references it via updateDesc (avoids temporal dead zone crash).
     const separatorSetting = new SettingEx(this.containerEl)
-      .setName('Title separator')
-      .addText((text) => {
-        text.setPlaceholder('Example: space or " - "');
-        this.bind(text, 'titleSeparator');
+      .setName('Title separator');
 
-        function updateDesc(value: string): void {
-          separatorSetting.setDesc(
-            'Only applies to "Title highlighted" mode. '
-            + 'When the title is fully selected, pressing the first character of this string '
-            + 'appends the full string instead of replacing the title. '
-            + 'Useful with timestamp titles: a space gives "20260604 My Note", '
-            + '" - " gives "20260604 - My Note". Leave empty to disable. '
-            + `Current: ${PluginSettingsTab.separatorLabel(value)}`
-          );
-        }
+    separatorSetting.addText((text) => {
+      text.setPlaceholder('Example: space or " - "');
+      this.bind(text, 'titleSeparator');
 
-        text.onChange(updateDesc);
-        updateDesc(this.plugin.settings.titleSeparator);
-      });
+      function updateDesc(value: string): void {
+        separatorSetting.setDesc(
+          'Only applies to "Title highlighted" mode. '
+          + 'When the title is fully selected, pressing the first character of this string '
+          + 'appends the full string instead of replacing the title. '
+          + 'Useful with timestamp titles: a space gives "20260604 My Note", '
+          + '" - " gives "20260604 - My Note". Leave empty to disable. '
+          + `Current: ${PluginSettingsTab.separatorLabel(value)}`
+        );
+      }
+
+      text.onChange(updateDesc);
+      updateDesc(this.plugin.settings.titleSeparator);
+    });
 
     new SettingEx(this.containerEl)
       .setName('On note creation')
