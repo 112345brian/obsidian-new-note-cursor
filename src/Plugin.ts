@@ -53,10 +53,6 @@ interface TemplaterPluginSettings {
 }
 
 export class Plugin extends PluginBase<PluginTypes> {
-  // Tracks files where the user has started interacting with the title, so
-  // retryCursor stops re-asserting focus after a frontmatter write steals it.
-  private readonly retryAborted = new Set<string>();
-
   public getBodyStart(editorInfo: MarkdownFileInfo): EditorPosition {
     const ed = editorInfo.editor;
     if (!ed) {
@@ -208,8 +204,7 @@ export class Plugin extends PluginBase<PluginTypes> {
   }
 
   public retryCursor(file: TFile, position: CursorPosition, retriesLeft: number): void {
-    if (retriesLeft <= 0 || this.retryAborted.has(file.path)) {
-      this.retryAborted.delete(file.path);
+    if (retriesLeft <= 0) {
       return;
     }
 
@@ -230,6 +225,16 @@ export class Plugin extends PluginBase<PluginTypes> {
       const view = this.app.workspace.getActiveViewOfType(MarkdownView);
       const titleEl = view?.containerEl.querySelector<HTMLElement>('.inline-title');
       const titleHasFocus = document.activeElement === titleEl;
+
+      // If title-highlighted was successfully applied and the user has since
+      // collapsed or changed the selection, they're actively editing — stop.
+      if (position === 'title-highlighted' && titleHasFocus && titleEl) {
+        const sel = window.getSelection();
+        const stillFullySelected = sel !== null && !sel.isCollapsed && sel.toString() === titleEl.textContent;
+        if (!stillFullySelected) {
+          return;
+        }
+      }
 
       // For body/end we want the editor focused, not the title.
       // For title-highlighted we want the title focused.
@@ -350,16 +355,6 @@ export class Plugin extends PluginBase<PluginTypes> {
     this.log('watchAndRedirect', { editorFile: editor?.file?.path ?? null, editorReady: !!editor?.editor, position });
     if (editor?.editor && editor.file?.path === file.path) {
       this.setCursorPosition(editor, position);
-    }
-
-    if (position === 'title-highlighted') {
-      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-      const titleEl = view?.containerEl.querySelector<HTMLElement>('.inline-title');
-      if (titleEl) {
-        titleEl.addEventListener('keydown', () => {
-          this.retryAborted.add(file.path);
-        }, { once: true });
-      }
     }
 
     const maxRetries = Platform.isMobileApp ? MAX_RETRIES_MOBILE : MAX_RETRIES_DESKTOP;
