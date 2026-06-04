@@ -268,6 +268,29 @@ export class Plugin extends PluginBase<PluginTypes> {
             sel.removeAllRanges();
             sel.addRange(range);
           }
+
+          // If a separator is configured, intercept the first keypress: if it
+          // Matches the separator's leading character, append the full separator
+          // To the title instead of replacing the selected text.
+          const separator = this.settings.titleSeparator;
+          if (separator) {
+            titleEl.addEventListener('keydown', (e: KeyboardEvent) => {
+              if (e.key !== separator[0]) {
+                return;
+              }
+              const currentSel = window.getSelection();
+              if (!currentSel || currentSel.isCollapsed) {
+                return;
+              }
+              if (currentSel.toString() !== titleEl.textContent) {
+                return;
+              }
+              e.preventDefault();
+              currentSel.collapseToEnd();
+              // eslint-disable-next-line @typescript-eslint/no-deprecated -- execCommand is the most reliable way to insert text into a contenteditable
+              document.execCommand('insertText', false, separator);
+            }, { once: true });
+          }
         }
       }
       return;

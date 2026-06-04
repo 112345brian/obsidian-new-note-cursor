@@ -6,4 +6,8 @@ export class PluginSettings {
   public excludedFolders: string[] = [];
   public onCreate: CursorPosition = 'title';
   public onOpen: CursorPositionOrNone = 'none';
+  // When title-highlighted mode is active, pressing the first character of this
+  // String appends it to the title instead of replacing the selected text.
+  // Empty = disabled. Example: ' - ' lets you press Space to get 'timestamp - '.
+  public titleSeparator = '';
 }
