@@ -285,7 +285,7 @@ export class Plugin extends PluginBase<PluginTypes> {
       // Obsidian's default for new notes is already cursor-at-title-end.
       return;
     }
-    const maxRetries = Platform.isMobile ? MAX_RETRIES_MOBILE : MAX_RETRIES_DESKTOP;
+    const maxRetries = Platform.isMobileApp ? MAX_RETRIES_MOBILE : MAX_RETRIES_DESKTOP;
     this.retryCursor(file, position, maxRetries);
   }
 
