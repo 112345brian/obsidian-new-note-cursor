@@ -298,17 +298,42 @@ export class Plugin extends PluginBase<PluginTypes> {
 
             const cleanup = () => {
               titleEl.removeEventListener('keydown', onKeyDown);
+              titleEl.removeEventListener('beforeinput', onBeforeInput);
               titleKeydownCleanups.delete(titleEl);
             };
 
+            // keydown handles non-printable bodyKeys (e.g. Enter) and aborts
+            // on non-matching printable keys. It does NOT handle single-char
+            // bodyKey/separator — iOS ignores e.preventDefault() in keydown
+            // for printable characters in contenteditable; beforeinput is used
+            // instead for those cases.
             const onKeyDown = (e: KeyboardEvent) => {
-              // Android virtual keyboards fire 'Unidentified'/'Process' before the
-              // user's intent registers — skip to avoid consuming the listener early.
-              if (e.key === 'Unidentified' || e.key === 'Process') {
+              if (e.key === 'Unidentified' || e.key === 'Process') return;
+
+              if (e.key.length === 1) {
+                // Single-char key: beforeinput will handle separator/bodyKey.
+                // If it's neither, the user started typing — stop intercepting.
+                if ((!separator || e.key !== separator[0]) && (!bodyKey || e.key !== bodyKey)) {
+                  cleanup();
+                }
                 return;
               }
 
-              if (separator.length > 0 && e.key === separator[0]) {
+              // Multi-char key (Enter, Tab, …) — handle here.
+              if (bodyKey && e.key === bodyKey) {
+                e.preventDefault();
+                ed.focus();
+                ed.setCursor(this.getBodyStart(editorInfo));
+                cleanup();
+              }
+            };
+
+            // beforeinput fires just before text insertion and e.preventDefault()
+            // is reliably honored on iOS for printable characters.
+            const onBeforeInput = (e: InputEvent) => {
+              if (e.inputType !== 'insertText' || !e.data) return;
+
+              if (separator.length > 0 && e.data === separator[0]) {
                 e.preventDefault();
                 window.getSelection()?.collapseToEnd();
                 // eslint-disable-next-line @typescript-eslint/no-deprecated -- execCommand is the most reliable way to insert text into a contenteditable
@@ -317,7 +342,7 @@ export class Plugin extends PluginBase<PluginTypes> {
                 return;
               }
 
-              if (bodyKey && e.key === bodyKey) {
+              if (bodyKey && e.data === bodyKey) {
                 e.preventDefault();
                 ed.focus();
                 ed.setCursor(this.getBodyStart(editorInfo));
@@ -325,15 +350,12 @@ export class Plugin extends PluginBase<PluginTypes> {
                 return;
               }
 
-              // Only stop intercepting when the user types a printable character
-              // (e.key.length === 1). Control keys (Enter, Backspace, arrows) and
-              // any key events fired internally by iOS/Obsidian don't count.
-              if (e.key.length === 1) {
-                cleanup();
-              }
+              // User typed something else — stop intercepting.
+              cleanup();
             };
 
             titleEl.addEventListener('keydown', onKeyDown);
+            titleEl.addEventListener('beforeinput', onBeforeInput);
             titleKeydownCleanups.set(titleEl, cleanup);
           }
         }
