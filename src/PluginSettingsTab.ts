@@ -13,9 +13,9 @@ const POSITION_OPTIONS = {
 export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
   private static separatorLabel(value: string): string {
     if (!value) {
-      return 'None (disabled)';
+      return '(disabled)';
     }
-    return `"${value.replace(/ /g, '·')}"`;
+    return `"${value.replace(/ /g, '␣')}"`;
   }
 
   public override display(): void {
@@ -27,23 +27,28 @@ export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
     const separatorSetting = new SettingEx(this.containerEl)
       .setName('Title separator');
 
+    separatorSetting.setDesc(
+      'Only applies to "Title highlighted" mode. '
+      + 'When the title is fully selected, pressing the first character of this string '
+      + 'appends it instead of replacing the title. '
+      + 'Example: a space gives "20260604 My Note", " - " gives "20260604 - My Note". '
+      + 'Leave empty to disable.'
+    );
+
     separatorSetting.addText((text) => {
-      text.setPlaceholder('Example: space or " - "');
+      text.setPlaceholder('Space, " - ", "_", …');
       this.bind(text, 'titleSeparator');
 
-      function updateDesc(value: string): void {
-        separatorSetting.setDesc(
-          'Only applies to "Title highlighted" mode. '
-          + 'When the title is fully selected, pressing the first character of this string '
-          + 'appends the full string instead of replacing the title. '
-          + 'Useful with timestamp titles: a space gives "20260604 My Note", '
-          + '" - " gives "20260604 - My Note". Leave empty to disable. '
-          + `Current: ${PluginSettingsTab.separatorLabel(value)}`
-        );
+      const preview = document.createElement('span');
+      preview.addClass('cursor-control-separator-preview');
+      text.inputEl.insertAdjacentElement('afterend', preview);
+
+      function updatePreview(value: string): void {
+        preview.textContent = PluginSettingsTab.separatorLabel(value);
       }
 
-      text.onChange(updateDesc);
-      updateDesc(this.plugin.settings.titleSeparator);
+      text.onChange(updatePreview);
+      updatePreview(this.plugin.settings.titleSeparator);
     });
 
     new SettingEx(this.containerEl)
