@@ -84,19 +84,19 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
 
     if (this.isExcluded(file)) {
-      console.debug('[CursorControl] excluded:', file.path);
+      this.log('excluded:', file.path);
       return;
     }
 
     const isNew = this.isNewlyCreated(file);
     const activeEditor = this.app.workspace.activeEditor;
-    console.debug('[CursorControl] file-open', { activeEditor: activeEditor?.file?.path ?? null, ctime: file.stat.ctime, isNew, now: Date.now(), path: file.path });
+    this.log('file-open', { activeEditor: activeEditor?.file?.path ?? null, ctime: file.stat.ctime, isNew, now: Date.now(), path: file.path });
 
     // Templater writes template content after its own 300 ms delay.
     // Defer past that so we read the final frontmatter and only apply
     // If the template explicitly declares a cursor-position key.
     if (isNew && this.templaterWillProcess(file)) {
-      console.debug('[CursorControl] deferring for Templater');
+      this.log('deferring for Templater');
       window.setTimeout(() => {
         const editor = this.app.workspace.activeEditor;
         if (!editor?.editor || editor.file?.path !== file.path) {
@@ -104,8 +104,12 @@ export class Plugin extends PluginBase<PluginTypes> {
         }
         const view = editor instanceof MarkdownView ? editor : null;
         const override = view ? this.getFrontmatterOverride(view, true) : null;
-        if (override && override !== 'none') {
-          this.setCursorPosition(editor, override);
+        // Frontmatter override takes priority; fall back to the onCreate setting.
+        // Override can be 'none' (explicit suppression) or null (not set — use setting).
+        const templaterPosition = override ?? this.settings.onCreate;
+        this.log('Templater defer resolved', { override, templaterPosition });
+        if (templaterPosition !== 'none') {
+          this.setCursorPosition(editor, templaterPosition);
         }
       }, TEMPLATER_DEFER_MS);
       return;
@@ -115,7 +119,7 @@ export class Plugin extends PluginBase<PluginTypes> {
       ? this.resolvePositionForNew(file)
       : this.resolvePositionForOpen(file);
 
-    console.debug('[CursorControl] resolved position:', position, '| settings onCreate:', this.settings.onCreate, 'onOpen:', this.settings.onOpen);
+    this.log('resolved position:', position, '| settings onCreate:', this.settings.onCreate, 'onOpen:', this.settings.onOpen);
 
     if (position === 'none') {
       return;
@@ -127,7 +131,7 @@ export class Plugin extends PluginBase<PluginTypes> {
       // Existing notes have no async initialization — apply immediately.
       const editor = this.app.workspace.activeEditor;
       if (!editor?.editor || editor.file?.path !== file.path) {
-        console.debug('[CursorControl] activeEditor mismatch on open, skipping');
+        this.log('activeEditor mismatch on open, skipping');
         return;
       }
       this.setCursorPosition(editor, position);
@@ -146,6 +150,12 @@ export class Plugin extends PluginBase<PluginTypes> {
 
   public isNewlyCreated(file: TFile): boolean {
     return (Date.now() - file.stat.ctime) <= NEW_FILE_TTL_MS;
+  }
+
+  public log(...args: unknown[]): void {
+    if (this.settings.debugMode) {
+      console.debug('[CursorControl]', ...args);
+    }
   }
 
   public readFrontmatterKey(view: MarkdownView, key: string): CursorPositionOrNone | null {
@@ -220,7 +230,7 @@ export class Plugin extends PluginBase<PluginTypes> {
       // For title-highlighted we want the title focused.
       const wrong = position === 'title-highlighted' ? !titleHasFocus : titleHasFocus;
       if (wrong) {
-        console.debug('[CursorControl] retryCursor fixing focus', { position, retriesLeft, titleHasFocus });
+        this.log('retryCursor fixing focus', { position, retriesLeft, titleHasFocus });
         this.setCursorPosition(fresh, position);
       }
 
@@ -295,7 +305,7 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
 
     const editor = this.app.workspace.activeEditor;
-    console.debug('[CursorControl] watchAndRedirect', { editorFile: editor?.file?.path ?? null, editorReady: !!editor?.editor, position });
+    this.log('watchAndRedirect', { editorFile: editor?.file?.path ?? null, editorReady: !!editor?.editor, position });
     if (editor?.editor && editor.file?.path === file.path) {
       this.setCursorPosition(editor, position);
     }

@@ -61,6 +61,7 @@ function makePlugin(
       _activeEditorRef: activeEditor,
     } as unknown as App,
     handleFileOpen: Plugin.prototype.handleFileOpen,
+    log: Plugin.prototype.log,
     watchAndRedirect: Plugin.prototype.watchAndRedirect,
     retryCursor: Plugin.prototype.retryCursor,
     getFrontmatterOverride: Plugin.prototype.getFrontmatterOverride,
@@ -271,10 +272,22 @@ describe('retryCursor', () => {
 describe('Templater', () => {
   beforeEach(() => { vi.useFakeTimers(); });
 
-  it('defers and skips when no frontmatter override', () => {
+  it('defers and falls back to onCreate setting when no frontmatter override', () => {
     const plugin = makePlugin('body');
     plugin.templaterWillProcess.mockReturnValue(true);
     const editor = makeEditorInfo(['']);
+    setActiveEditor(plugin, editor);
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.handleFileOpen(makeFile('test.md', Date.now()));
+    vi.advanceTimersByTime(350);
+    expect(spy).toHaveBeenCalledWith(editor, 'body');
+  });
+
+  it('defers and does nothing when onCreate is none and no frontmatter override', () => {
+    const plugin = makePlugin('body', 'none');
+    plugin.templaterWillProcess.mockReturnValue(true);
+    // Simulate a frontmatter override of 'none' (explicit suppression)
+    const editor = makeEditorInfo(['---', 'cursor-position: none', '---']);
     setActiveEditor(plugin, editor);
     const spy = vi.spyOn(plugin, 'setCursorPosition');
     plugin.handleFileOpen(makeFile('test.md', Date.now()));

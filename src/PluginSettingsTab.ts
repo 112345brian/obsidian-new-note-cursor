@@ -16,6 +16,13 @@ export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
     this.containerEl.empty();
 
     new SettingEx(this.containerEl)
+      .setName('Debug mode')
+      .setDesc('Log cursor placement decisions to the developer console (Cmd+Opt+I). Useful for troubleshooting.')
+      .addToggle((toggle) => {
+        this.bind(toggle, 'debugMode');
+      });
+
+    new SettingEx(this.containerEl)
       .setName('On note creation')
       .setDesc(
         'Where the cursor lands when a new note is created. '
