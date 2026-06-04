@@ -297,7 +297,6 @@ export class Plugin extends PluginBase<PluginTypes> {
 
             const cleanup = () => {
               titleEl.removeEventListener('keydown', onKeyDown);
-              titleEl.removeEventListener('blur', cleanup);
               titleKeydownCleanups.delete(titleEl);
             };
 
@@ -325,12 +324,15 @@ export class Plugin extends PluginBase<PluginTypes> {
                 return;
               }
 
-              // Any other key means the user is typing — stop intercepting.
-              cleanup();
+              // Only stop intercepting when the user types a printable character
+              // (e.key.length === 1). Control keys (Enter, Backspace, arrows) and
+              // any key events fired internally by iOS/Obsidian don't count.
+              if (e.key.length === 1) {
+                cleanup();
+              }
             };
 
             titleEl.addEventListener('keydown', onKeyDown);
-            titleEl.addEventListener('blur', cleanup);
             titleKeydownCleanups.set(titleEl, cleanup);
           }
         }
