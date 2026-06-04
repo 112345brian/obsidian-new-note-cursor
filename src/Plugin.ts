@@ -84,15 +84,19 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
 
     if (this.isExcluded(file)) {
+      console.debug('[CursorControl] excluded:', file.path);
       return;
     }
 
     const isNew = this.isNewlyCreated(file);
+    const activeEditor = this.app.workspace.activeEditor;
+    console.debug('[CursorControl] file-open', { activeEditor: activeEditor?.file?.path ?? null, ctime: file.stat.ctime, isNew, now: Date.now(), path: file.path });
 
     // Templater writes template content after its own 300 ms delay.
     // Defer past that so we read the final frontmatter and only apply
     // If the template explicitly declares a cursor-position key.
     if (isNew && this.templaterWillProcess(file)) {
+      console.debug('[CursorControl] deferring for Templater');
       window.setTimeout(() => {
         const editor = this.app.workspace.activeEditor;
         if (!editor?.editor || editor.file?.path !== file.path) {
@@ -111,20 +115,19 @@ export class Plugin extends PluginBase<PluginTypes> {
       ? this.resolvePositionForNew(file)
       : this.resolvePositionForOpen(file);
 
+    console.debug('[CursorControl] resolved position:', position, '| settings onCreate:', this.settings.onCreate, 'onOpen:', this.settings.onOpen);
+
     if (position === 'none') {
       return;
     }
 
     if (isNew) {
-      // For new notes, Obsidian asynchronously focuses the inline title one or
-      // More times during its initialization sequence. A fixed delay can't beat
-      // All of them reliably. Instead, watch the title element and redirect on
-      // Every focus event until the initialization window closes.
       this.watchAndRedirect(file, position);
     } else {
       // Existing notes have no async initialization — apply immediately.
       const editor = this.app.workspace.activeEditor;
       if (!editor?.editor || editor.file?.path !== file.path) {
+        console.debug('[CursorControl] activeEditor mismatch on open, skipping');
         return;
       }
       this.setCursorPosition(editor, position);
@@ -197,7 +200,15 @@ export class Plugin extends PluginBase<PluginTypes> {
 
     window.setTimeout(() => {
       const fresh = this.app.workspace.activeEditor;
-      if (!fresh?.editor || fresh.file?.path !== file.path) {
+
+      // Editor not ready yet — keep watching rather than giving up.
+      if (!fresh) {
+        this.retryCursor(file, position, retriesLeft - 1);
+        return;
+      }
+
+      // A different file became active — the user navigated away, stop.
+      if (!fresh.editor || fresh.file?.path !== file.path) {
         return;
       }
 
@@ -209,6 +220,7 @@ export class Plugin extends PluginBase<PluginTypes> {
       // For title-highlighted we want the title focused.
       const wrong = position === 'title-highlighted' ? !titleHasFocus : titleHasFocus;
       if (wrong) {
+        console.debug('[CursorControl] retryCursor fixing focus', { position, retriesLeft, titleHasFocus });
         this.setCursorPosition(fresh, position);
       }
 
@@ -283,11 +295,10 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
 
     const editor = this.app.workspace.activeEditor;
-    if (!editor?.editor || editor.file?.path !== file.path) {
-      return;
+    console.debug('[CursorControl] watchAndRedirect', { editorFile: editor?.file?.path ?? null, editorReady: !!editor?.editor, position });
+    if (editor?.editor && editor.file?.path === file.path) {
+      this.setCursorPosition(editor, position);
     }
-
-    this.setCursorPosition(editor, position);
 
     const maxRetries = Platform.isMobileApp ? MAX_RETRIES_MOBILE : MAX_RETRIES_DESKTOP;
     this.retryCursor(file, position, maxRetries);
