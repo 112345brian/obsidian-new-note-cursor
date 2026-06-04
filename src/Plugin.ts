@@ -53,6 +53,10 @@ interface TemplaterPluginSettings {
 }
 
 export class Plugin extends PluginBase<PluginTypes> {
+  // Tracks files where the user has started interacting with the title, so
+  // retryCursor stops re-asserting focus after a frontmatter write steals it.
+  private readonly retryAborted = new Set<string>();
+
   public getBodyStart(editorInfo: MarkdownFileInfo): EditorPosition {
     const ed = editorInfo.editor;
     if (!ed) {
@@ -204,7 +208,8 @@ export class Plugin extends PluginBase<PluginTypes> {
   }
 
   public retryCursor(file: TFile, position: CursorPosition, retriesLeft: number): void {
-    if (retriesLeft <= 0) {
+    if (retriesLeft <= 0 || this.retryAborted.has(file.path)) {
+      this.retryAborted.delete(file.path);
       return;
     }
 
@@ -345,6 +350,16 @@ export class Plugin extends PluginBase<PluginTypes> {
     this.log('watchAndRedirect', { editorFile: editor?.file?.path ?? null, editorReady: !!editor?.editor, position });
     if (editor?.editor && editor.file?.path === file.path) {
       this.setCursorPosition(editor, position);
+    }
+
+    if (position === 'title-highlighted') {
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      const titleEl = view?.containerEl.querySelector<HTMLElement>('.inline-title');
+      if (titleEl) {
+        titleEl.addEventListener('keydown', () => {
+          this.retryAborted.add(file.path);
+        }, { once: true });
+      }
     }
 
     const maxRetries = Platform.isMobileApp ? MAX_RETRIES_MOBILE : MAX_RETRIES_DESKTOP;
