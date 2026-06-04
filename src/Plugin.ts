@@ -2,7 +2,9 @@ import type {
   MarkdownFileInfo, TFile
 } from 'obsidian';
 
-import { MarkdownView } from 'obsidian';
+import {
+ MarkdownView, Platform
+} from 'obsidian';
 import { PluginBase } from 'obsidian-dev-utils/obsidian/plugin/plugin-base';
 
 import type {
@@ -16,8 +18,9 @@ import { PluginSettingsTab } from './PluginSettingsTab.ts';
 const NEW_FILE_TTL_MS = 5_000;
 const TEMPLATER_DEFER_MS = 350;
 // Inspired by obsidian-last-position: apply, verify, retry if wrong.
-// 10 retries × 100 ms = 1 second total window.
-const MAX_RETRIES = 10;
+// Mobile Obsidian initializes more slowly so we give it a longer window.
+const MAX_RETRIES_DESKTOP = 10; //  10 × 100 ms = 1 s
+const MAX_RETRIES_MOBILE = 20; //  20 × 100 ms = 2 s
 const RETRY_DELAY_MS = 100;
 // Frontmatter requires at least an opening --- and one closing line.
 const FRONTMATTER_MIN_LINES = 2;
@@ -282,7 +285,8 @@ export class Plugin extends PluginBase<PluginTypes> {
       // Obsidian's default for new notes is already cursor-at-title-end.
       return;
     }
-    this.retryCursor(file, position, MAX_RETRIES);
+    const maxRetries = Platform.isMobile ? MAX_RETRIES_MOBILE : MAX_RETRIES_DESKTOP;
+    this.retryCursor(file, position, maxRetries);
   }
 
   protected override createSettingsManager(): PluginSettingsManager {
