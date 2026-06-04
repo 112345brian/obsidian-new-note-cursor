@@ -11,29 +11,36 @@ const POSITION_OPTIONS = {
 };
 
 export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
+  private static separatorLabel(value: string): string {
+    if (!value) {
+      return 'None (disabled)';
+    }
+    return `"${value.replace(/ /g, '·')}"`;
+  }
+
   public override display(): void {
     super.display();
     this.containerEl.empty();
 
-    new SettingEx(this.containerEl)
+    const separatorSetting = new SettingEx(this.containerEl)
       .setName('Title separator')
-      .setDesc(
-        'Only applies to "Title highlighted" mode. '
-        + 'When the title is fully selected, pressing the first character of this string '
-        + 'appends the full string instead of replacing the title. '
-        + 'Useful with timestamp titles: a space gives "20260604 My Note", '
-        + '" - " gives "20260604 - My Note". Leave empty to disable.'
-      )
       .addText((text) => {
         text.setPlaceholder('Example: space or " - "');
         this.bind(text, 'titleSeparator');
-      });
 
-    new SettingEx(this.containerEl)
-      .setName('Debug mode')
-      .setDesc('Log cursor placement decisions to the developer console (Cmd+Opt+I). Useful for troubleshooting.')
-      .addToggle((toggle) => {
-        this.bind(toggle, 'debugMode');
+        function updateDesc(value: string): void {
+          separatorSetting.setDesc(
+            'Only applies to "Title highlighted" mode. '
+            + 'When the title is fully selected, pressing the first character of this string '
+            + 'appends the full string instead of replacing the title. '
+            + 'Useful with timestamp titles: a space gives "20260604 My Note", '
+            + '" - " gives "20260604 - My Note". Leave empty to disable. '
+            + `Current: ${PluginSettingsTab.separatorLabel(value)}`
+          );
+        }
+
+        text.onChange(updateDesc);
+        updateDesc(this.plugin.settings.titleSeparator);
       });
 
     new SettingEx(this.containerEl)
