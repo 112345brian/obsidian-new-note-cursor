@@ -62,6 +62,7 @@ function makePlugin(
     } as unknown as App,
     handleFileOpen: Plugin.prototype.handleFileOpen,
     watchAndRedirect: Plugin.prototype.watchAndRedirect,
+    retryCursor: Plugin.prototype.retryCursor,
     getFrontmatterOverride: Plugin.prototype.getFrontmatterOverride,
     readFrontmatterKey: Plugin.prototype.readFrontmatterKey,
     resolvePositionForNew: Plugin.prototype.resolvePositionForNew,
@@ -167,13 +168,13 @@ describe('handleFileOpen', () => {
 });
 
 // ---------------------------------------------------------------------------
-// watchAndRedirect
+// watchAndRedirect / retryCursor
 // ---------------------------------------------------------------------------
 
 describe('watchAndRedirect', () => {
   beforeEach(() => { vi.useFakeTimers(); });
 
-  it('does nothing for title mode', () => {
+  it('does nothing for title mode (Obsidian default is correct)', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo([]);
     setActiveEditor(plugin, editor);
@@ -183,73 +184,75 @@ describe('watchAndRedirect', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('redirects to body when title focus fires', () => {
+  it('delegates to retryCursor for non-title modes', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo(['content']);
     setActiveEditor(plugin, editor);
+    const spy = vi.spyOn(plugin, 'retryCursor').mockImplementation(() => undefined);
     plugin.watchAndRedirect(makeFile(), 'body');
-    vi.advanceTimersByTime(0);
+    expect(spy).toHaveBeenCalledWith(expect.anything(), 'body', 10);
+  });
+});
 
-    editor._titleEl.dispatchEvent(new Event('focus'));
-    vi.advanceTimersByTime(0);
+describe('retryCursor', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
 
-    expect(editor.editor.focus).toHaveBeenCalled();
+  it('applies cursor immediately', () => {
+    const plugin = makePlugin();
+    const editor = makeEditorInfo(['content']);
+    setActiveEditor(plugin, editor);
+    plugin.retryCursor(makeFile(), 'body', 3);
     expect(editor.editor.setCursor).toHaveBeenCalledWith({ ch: 0, line: 0 });
   });
 
-  it('redirects to end when title focus fires', () => {
-    const plugin = makePlugin();
-    const editor = makeEditorInfo(['first', 'last line']);
-    setActiveEditor(plugin, editor);
-    plugin.watchAndRedirect(makeFile(), 'end');
-    vi.advanceTimersByTime(0);
-
-    editor._titleEl.dispatchEvent(new Event('focus'));
-    vi.advanceTimersByTime(0);
-
-    expect(editor.editor.setCursor).toHaveBeenCalledWith({ ch: 9, line: 1 });
-  });
-
-  it('handles multiple focus events up to the intercept limit', () => {
+  it('does not retry when editor has focus (title does not)', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo(['content']);
     setActiveEditor(plugin, editor);
-    plugin.watchAndRedirect(makeFile(), 'body');
-    vi.advanceTimersByTime(0);
-
-    for (let i = 0; i < 5; i++) {
-      editor._titleEl.dispatchEvent(new Event('focus'));
-      vi.advanceTimersByTime(0);
-    }
-    expect(editor.editor.setCursor).toHaveBeenCalledTimes(5);
-
-    // 6th should be ignored
-    editor.editor.setCursor.mockClear();
-    editor._titleEl.dispatchEvent(new Event('focus'));
-    vi.advanceTimersByTime(0);
-    expect(editor.editor.setCursor).not.toHaveBeenCalled();
+    // document.activeElement is NOT the title → correct for body mode
+    const spy = vi.spyOn(plugin, 'retryCursor');
+    plugin.retryCursor(makeFile(), 'body', 3);
+    vi.advanceTimersByTime(100);
+    // Only the initial call — no retry
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it('removes listener after safety timeout', () => {
+  it('retries when title has focus for body mode', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo(['content']);
     setActiveEditor(plugin, editor);
-    const removeSpy = vi.spyOn(editor._titleEl, 'removeEventListener');
-    plugin.watchAndRedirect(makeFile(), 'body');
-    vi.advanceTimersByTime(0);
-    vi.advanceTimersByTime(2_000);
-    expect(removeSpy).toHaveBeenCalled();
+
+    // Make the title appear focused by overriding querySelector in the view
+    plugin.app.workspace.getActiveViewOfType.mockReturnValue({
+      ...editor,
+      containerEl: {
+        querySelector: () => document.activeElement, // activeElement === the "title"
+      },
+    });
+
+    const spy = vi.spyOn(plugin, 'retryCursor');
+    plugin.retryCursor(makeFile(), 'body', 2);
+    vi.advanceTimersByTime(100);
+    expect(spy).toHaveBeenCalledTimes(2); // initial + 1 retry
   });
 
-  it('applies directly when inline-title element is absent', () => {
+  it('stops when retriesLeft reaches 0', () => {
     const plugin = makePlugin();
     const editor = makeEditorInfo(['content']);
-    editor.containerEl.querySelector = vi.fn().mockReturnValue(null);
     setActiveEditor(plugin, editor);
     const spy = vi.spyOn(plugin, 'setCursorPosition');
-    plugin.watchAndRedirect(makeFile(), 'body');
-    vi.advanceTimersByTime(0);
-    expect(spy).toHaveBeenCalledWith(editor, 'body');
+    plugin.retryCursor(makeFile(), 'body', 0);
+    vi.runAllTimers();
+    // setCursorPosition called once (the initial apply), no further retries
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing when file is no longer active', () => {
+    const plugin = makePlugin();
+    setActiveEditor(plugin, makeEditorInfo([], 'other.md'));
+    const spy = vi.spyOn(plugin, 'setCursorPosition');
+    plugin.retryCursor(makeFile('test.md'), 'body', 3);
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 
