@@ -65,7 +65,7 @@ export class Plugin extends PluginBase<PluginTypes> {
           if (bodyLine < ed.lineCount() && ed.getLine(bodyLine).trim() === '') {
             bodyLine += 1;
           }
-          return { ch: 0, line: Math.min(bodyLine, ed.lineCount() - 1) };
+          return { ch: 0, line: Math.max(0, Math.min(bodyLine, ed.lineCount() - 1)) };
         }
       }
     }
@@ -246,7 +246,8 @@ export class Plugin extends PluginBase<PluginTypes> {
       return;
     }
 
-    if (position === 'title' || position === 'title-highlighted') {
+    try {
+      if (position === 'title' || position === 'title-highlighted') {
       const view = editorInfo instanceof MarkdownView
         ? editorInfo
         : this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -309,9 +310,16 @@ export class Plugin extends PluginBase<PluginTypes> {
     }
 
     // Position === 'end'
-    const lastLine = ed.lineCount() - 1;
+    const lastLine = Math.max(0, ed.lineCount() - 1);
     ed.focus();
     ed.setCursor({ ch: ed.getLine(lastLine).length, line: lastLine });
+    } catch (err) {
+      if (err instanceof RangeError) {
+        this.log('setCursorPosition: RangeError suppressed (doc not ready)', { err, position });
+        return;
+      }
+      throw err;
+    }
   }
 
   public templaterWillProcess(file: TFile): boolean {
