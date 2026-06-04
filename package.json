@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "description": "Control where the cursor lands when creating or opening notes.",
   "keywords": [],
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "author": "bripow",
   "type": "module",
   "scripts": {

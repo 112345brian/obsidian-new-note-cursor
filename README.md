@@ -92,4 +92,4 @@ Copy `dist/build/` into your vault's `.obsidian/plugins/cursor-control/` directo
 
 ## License
 
-MIT © [Brian Powers](https://github.com/112345brian)
+GPL-3.0 © [Brian Powers](https://github.com/112345brian)
