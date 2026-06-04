@@ -11,14 +11,7 @@ const POSITION_OPTIONS = {
 };
 
 export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
-  private static separatorLabel(value: string): string {
-    if (!value) {
-      return '(disabled)';
-    }
-    return `"${value.replace(/ /g, '␣')}"`;
-  }
-
-  public override display(): void {
+public override display(): void {
     super.display();
     this.containerEl.empty();
 
@@ -37,18 +30,23 @@ export class PluginSettingsTab extends PluginSettingsTabBase<PluginTypes> {
 
     separatorSetting.addText((text) => {
       text.setPlaceholder('Space, " - ", "_", …');
+      // Let bind handle load/save as normal.
       this.bind(text, 'titleSeparator');
 
-      const preview = document.createElement('span');
-      preview.addClass('cursor-control-separator-preview');
-      text.inputEl.insertAdjacentElement('afterend', preview);
+      // After bind sets the initial value, replace spaces with ␣ for display.
+      // Setting .value directly does not fire input/change events, so bind
+      // Never sees the ␣ character — only the real value on actual edits.
+      text.inputEl.value = text.inputEl.value.replace(/ /g, '␣');
 
-      function updatePreview(value: string): void {
-        preview.textContent = PluginSettingsTab.separatorLabel(value);
-      }
+      text.inputEl.addEventListener('focus', () => {
+        // Restore real spaces so the user edits the actual value.
+        text.inputEl.value = text.inputEl.value.replace(/␣/g, ' ');
+      });
 
-      text.onChange(updatePreview);
-      updatePreview(this.plugin.settings.titleSeparator);
+      text.inputEl.addEventListener('blur', () => {
+        // Back to visual form without triggering a save.
+        text.inputEl.value = text.inputEl.value.replace(/ /g, '␣');
+      });
     });
 
     new SettingEx(this.containerEl)
