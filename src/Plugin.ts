@@ -25,6 +25,9 @@ const RETRY_DELAY_MS = 100;
 // Frontmatter requires at least an opening --- and one closing line.
 const FRONTMATTER_MIN_LINES = 2;
 
+// Tracks active bodyKey/separator listeners per title element so retries don't stack duplicates.
+const titleKeydownCleanups = new WeakMap<HTMLElement, () => void>();
+
 const VALID_FRONTMATTER_VALUES: readonly CursorPositionOrNone[] = [
   'body', 'end', 'none', 'title', 'title-highlighted'
 ];
@@ -228,7 +231,9 @@ export class Plugin extends PluginBase<PluginTypes> {
 
       // If title-highlighted was successfully applied and the user has since
       // collapsed or changed the selection, they're actively editing — stop.
-      if (position === 'title-highlighted' && titleHasFocus && titleEl) {
+      // window.getSelection() is unreliable for programmatic contenteditable
+      // selections on real mobile WebViews, so skip this check there.
+      if (position === 'title-highlighted' && titleHasFocus && titleEl && !Platform.isMobileApp) {
         const sel = window.getSelection();
         const stillFullySelected = sel !== null && !sel.isCollapsed && sel.toString() === titleEl.textContent;
         if (!stillFullySelected) {
@@ -287,17 +292,28 @@ export class Plugin extends PluginBase<PluginTypes> {
           const bodyKey = this.settings.titleBodyKey;
 
           if (separator || bodyKey) {
-            titleEl.addEventListener('keydown', (e: KeyboardEvent) => {
-              const currentSel = window.getSelection();
-              if (currentSel?.isCollapsed !== false || currentSel.toString() !== titleEl.textContent) {
+            // Remove any listener from a previous retry to avoid stacking duplicates.
+            titleKeydownCleanups.get(titleEl)?.();
+
+            const cleanup = () => {
+              titleEl.removeEventListener('keydown', onKeyDown);
+              titleEl.removeEventListener('blur', cleanup);
+              titleKeydownCleanups.delete(titleEl);
+            };
+
+            const onKeyDown = (e: KeyboardEvent) => {
+              // Android virtual keyboards fire 'Unidentified'/'Process' before the
+              // user's intent registers — skip to avoid consuming the listener early.
+              if (e.key === 'Unidentified' || e.key === 'Process') {
                 return;
               }
 
               if (separator.length > 0 && e.key === separator[0]) {
                 e.preventDefault();
-                currentSel.collapseToEnd();
+                window.getSelection()?.collapseToEnd();
                 // eslint-disable-next-line @typescript-eslint/no-deprecated -- execCommand is the most reliable way to insert text into a contenteditable
                 document.execCommand('insertText', false, separator);
+                cleanup();
                 return;
               }
 
@@ -305,8 +321,17 @@ export class Plugin extends PluginBase<PluginTypes> {
                 e.preventDefault();
                 ed.focus();
                 ed.setCursor(this.getBodyStart(editorInfo));
+                cleanup();
+                return;
               }
-            }, { once: true });
+
+              // Any other key means the user is typing — stop intercepting.
+              cleanup();
+            };
+
+            titleEl.addEventListener('keydown', onKeyDown);
+            titleEl.addEventListener('blur', cleanup);
+            titleKeydownCleanups.set(titleEl, cleanup);
           }
         }
       }
