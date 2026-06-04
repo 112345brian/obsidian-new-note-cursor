@@ -28,6 +28,29 @@ public override display(): void {
       + 'Leave empty to disable.'
     );
 
+    const bodySetting = new SettingEx(this.containerEl)
+      .setName('Title → body key')
+      .setDesc(
+        'Only applies to "Title highlighted" mode. '
+        + 'When the title is fully selected, pressing this key moves the cursor '
+        + 'directly to the body. Example: Enter. Leave empty to disable.'
+      );
+
+    bodySetting.addText((text) => {
+      text.setPlaceholder('Example: enter key name');
+      this.bind(text, 'titleBodyKey');
+
+      text.inputEl.value = text.inputEl.value.replace(/ /g, '␣');
+
+      text.inputEl.addEventListener('focus', () => {
+        text.inputEl.value = text.inputEl.value.replace(/␣/g, ' ');
+      });
+
+      text.inputEl.addEventListener('blur', () => {
+        text.inputEl.value = text.inputEl.value.replace(/ /g, '␣');
+      });
+    });
+
     separatorSetting.addText((text) => {
       text.setPlaceholder('Space, " - ", "_", …');
       // Let bind handle load/save as normal.

@@ -273,22 +273,28 @@ export class Plugin extends PluginBase<PluginTypes> {
           // Matches the separator's leading character, append the full separator
           // To the title instead of replacing the selected text.
           const separator = this.settings.titleSeparator;
-          if (separator) {
+          const bodyKey = this.settings.titleBodyKey;
+
+          if (separator || bodyKey) {
             titleEl.addEventListener('keydown', (e: KeyboardEvent) => {
-              if (e.key !== separator[0]) {
-                return;
-              }
               const currentSel = window.getSelection();
-              if (!currentSel || currentSel.isCollapsed) {
+              if (currentSel?.isCollapsed !== false || currentSel.toString() !== titleEl.textContent) {
                 return;
               }
-              if (currentSel.toString() !== titleEl.textContent) {
+
+              if (separator.length > 0 && e.key === separator[0]) {
+                e.preventDefault();
+                currentSel.collapseToEnd();
+                // eslint-disable-next-line @typescript-eslint/no-deprecated -- execCommand is the most reliable way to insert text into a contenteditable
+                document.execCommand('insertText', false, separator);
                 return;
               }
-              e.preventDefault();
-              currentSel.collapseToEnd();
-              // eslint-disable-next-line @typescript-eslint/no-deprecated -- execCommand is the most reliable way to insert text into a contenteditable
-              document.execCommand('insertText', false, separator);
+
+              if (bodyKey && e.key === bodyKey) {
+                e.preventDefault();
+                ed.focus();
+                ed.setCursor(this.getBodyStart(editorInfo));
+              }
             }, { once: true });
           }
         }
